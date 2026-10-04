@@ -1,40 +1,43 @@
-@import '@fontsource-variable/source-serif-4';
+@import '@fontsource-variable/source-serif-4/opsz.css';
+@import '@fontsource-variable/source-serif-4/opsz-italic.css';
 @import '@fontsource-variable/source-sans-3';
 @import '@fontsource-variable/jetbrains-mono';
 
 :root {
   --bg: #f6f2ea;
-  --text: #2b2723;
-  --muted: #6e665d;
-  --rule: #ddd5c8;
+  --text: #24211d;
+  --muted: #6c655b;
+  --rule: #dcd4c6;
   --tint: #ede7dc;
-  --link: #8a4f33;
+  --link: #2b4f80;
   --serif: 'Source Serif 4 Variable', Georgia, serif;
   --sans: 'Source Sans 3 Variable', system-ui, sans-serif;
   --mono: 'JetBrains Mono Variable', ui-monospace, monospace;
-  --measure: 40rem;
+  --main: 37rem;
+  --side: 17rem;
+  --gap: 3rem;
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
-    --bg: #1d1b18;
-    --text: #e6e0d6;
-    --muted: #a39b8f;
-    --rule: #3a3530;
-    --tint: #26231f;
-    --link: #d29a76;
+    --bg: #1a1916;
+    --text: #e7e1d6;
+    --muted: #a0988b;
+    --rule: #37332d;
+    --tint: #23211d;
+    --link: #9ab6dc;
     color-scheme: dark;
   }
 }
 
 :root[data-theme='dark'] {
-  --bg: #1d1b18;
-  --text: #e6e0d6;
-  --muted: #a39b8f;
-  --rule: #3a3530;
-  --tint: #26231f;
-  --link: #d29a76;
+  --bg: #1a1916;
+  --text: #e7e1d6;
+  --muted: #a0988b;
+  --rule: #37332d;
+  --tint: #23211d;
+  --link: #9ab6dc;
   color-scheme: dark;
 }
 
@@ -53,7 +56,9 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 400 18px/1.65 var(--sans);
+  font: 400 19px/1.62 var(--serif);
+  font-optical-sizing: auto;
+  font-variant-numeric: oldstyle-nums proportional-nums;
 }
 
 a {
@@ -61,37 +66,73 @@ a {
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, var(--link) 45%, transparent);
 }
 
-/* the page sits on the left, the way a printed page has a margin */
-.page {
-  max-width: 64rem;
-  padding: 0 24px 0 clamp(24px, 9vw, 140px);
+::selection {
+  background: color-mix(in srgb, var(--link) 22%, transparent);
 }
 
-.prose {
-  max-width: var(--measure);
+:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 3px;
+}
+
+/* the page: a main column, and a margin on the right for notes, captions and facts */
+.frame {
+  max-width: calc(var(--main) + var(--gap) + var(--side));
+  margin: 0 auto;
+  padding: 0 28px;
+  box-sizing: content-box;
+}
+
+.main {
+  max-width: var(--main);
 }
 
 header.site {
   display: flex;
-  flex-wrap: wrap;
   align-items: baseline;
-  gap: 8px 22px;
-  padding-top: 28px;
-  padding-bottom: 22px;
+  gap: 24px;
+  padding-top: 30px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--rule);
 }
 
 header.site .name {
-  font: 600 1.15rem var(--serif);
+  font: 600 1.2rem var(--serif);
   color: var(--text);
   text-decoration: none;
-  margin-right: 14px;
 }
 
-header.site a:not(.name) {
+header.site nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 22px;
+  margin-left: auto;
+  font: 15.5px var(--sans);
+}
+
+header.site nav a {
   color: var(--muted);
-  font-size: 16px;
+  text-decoration: none;
+}
+
+main {
+  padding-top: 64px;
+  padding-bottom: 110px;
+}
+
+footer.site {
+  padding-top: 22px;
+  padding-bottom: 56px;
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font: 15px/1.6 var(--sans);
+}
+
+footer.site a {
+  color: var(--muted);
 }
 
 .theme {
@@ -100,55 +141,45 @@ header.site a:not(.name) {
   padding: 0;
   color: var(--muted);
   font: inherit;
-  font-size: 16px;
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
   cursor: pointer;
 }
 
-main {
-  padding-top: 40px;
-  padding-bottom: 100px;
-}
-
-footer.site {
-  padding-top: 24px;
-  padding-bottom: 48px;
-  color: var(--muted);
-  font-size: 16px;
-  border-top: 1px solid var(--rule);
-  max-width: var(--measure);
-}
-
-footer.site a {
-  color: var(--muted);
-}
-
-/* type: one big headline per page, the rest stay modest */
+/* type */
 
 h1,
 h2,
 h3 {
   font-family: var(--serif);
   font-weight: 600;
-  line-height: 1.25;
+  line-height: 1.2;
   margin: 0;
+  font-variant-numeric: lining-nums;
+  text-wrap: balance;
+}
+
+p,
+li,
+figcaption,
+.note {
+  text-wrap: pretty;
 }
 
 h1 {
-  font-size: 2.3rem;
-  margin-bottom: 1.4rem;
+  font-size: 2.6rem;
+  margin-bottom: 1.6rem;
 }
 
 h2 {
-  font-size: 1.3rem;
-  margin: 3rem 0 0.8rem;
+  font-size: 1.5rem;
+  margin: 3.4rem 0 0.9rem;
 }
 
 h3 {
-  font-size: 1.08rem;
-  margin: 2rem 0 0.5rem;
+  font-size: 1.15rem;
+  margin: 2.2rem 0 0.5rem;
 }
 
 p,
@@ -159,12 +190,12 @@ table,
 pre,
 figure,
 blockquote {
-  margin: 0 0 1.1rem;
+  margin: 0 0 1.15rem;
 }
 
 ul,
 ol {
-  padding-left: 1.2rem;
+  padding-left: 1.3rem;
 }
 
 li {
@@ -175,15 +206,10 @@ strong {
   font-weight: 600;
 }
 
-hr {
-  border: 0;
-  border-top: 1px solid var(--rule);
-  margin: 2.5rem 0;
-}
-
 blockquote {
-  padding-left: 18px;
+  padding-left: 20px;
   border-left: 1px solid var(--rule);
+  font-style: italic;
   color: var(--muted);
 }
 
@@ -191,28 +217,50 @@ blockquote p:last-child {
   margin-bottom: 0;
 }
 
+/* side notes: in the margin on a wide screen, in the flow on a narrow one */
+.note {
+  font: 14.5px/1.55 var(--sans);
+  color: var(--muted);
+  margin: 0 0 1.15rem;
+}
+
+.note a {
+  color: var(--muted);
+}
+
+@media (min-width: 1000px) {
+  .note {
+    float: right;
+    clear: right;
+    width: var(--side);
+    margin: 0.35rem calc(-1 * (var(--side) + var(--gap))) 1rem 0;
+  }
+}
+
 /* code */
 
 code,
 pre {
   font-family: var(--mono);
+  font-variant-numeric: normal;
 }
 
 :not(pre) > code {
-  font-size: 0.84em;
+  font-size: 0.8em;
   background: var(--tint);
   padding: 0.1em 0.3em;
+  border-radius: 2px;
 }
 
 pre {
   background: var(--tint) !important;
-  padding: 14px 16px;
+  padding: 16px 18px;
   overflow-x: auto;
   font-size: 13.5px;
   line-height: 1.6;
+  border-radius: 2px;
 }
 
-/* shiki's two themes as variables: light by default, dark when the page is */
 .astro-code,
 .astro-code span {
   color: var(--shiki-light);
@@ -230,78 +278,55 @@ pre {
   color: var(--shiki-dark);
 }
 
-.source {
-  display: block;
-  margin: -0.6rem 0 1.3rem;
-  font-size: 15px;
-}
-
-/* tables, lists of facts, figures */
+/* tables and figures use the sans, with lining figures that line up */
 
 table {
   width: 100%;
   border-collapse: collapse;
-  font-variant-numeric: tabular-nums;
+  font: 16px/1.5 var(--sans);
+  font-variant-numeric: lining-nums tabular-nums;
 }
 
 th,
 td {
   text-align: left;
   font-weight: 400;
-  padding: 7px 14px 7px 0;
+  padding: 8px 16px 8px 0;
   border-bottom: 1px solid var(--rule);
   vertical-align: top;
 }
 
 th {
   color: var(--muted);
-}
-
-dl.facts {
-  display: grid;
-  grid-template-columns: minmax(11rem, max-content) 1fr;
-  max-width: var(--measure);
-}
-
-dl.facts dt,
-dl.facts dd {
-  margin: 0;
-  padding: 7px 0;
-  border-bottom: 1px solid var(--rule);
-}
-
-dl.facts dt {
-  color: var(--muted);
-  padding-right: 24px;
+  border-bottom-color: var(--muted);
 }
 
 figure {
-  margin: 1.8rem 0;
+  margin: 2.2rem 0;
 }
 
 figcaption {
+  font: 14.5px/1.55 var(--sans);
   color: var(--muted);
-  font-size: 16px;
-  margin-top: 8px;
+  margin-top: 10px;
 }
 
-/* buttons: square, outlined, no effects */
+/* buttons */
 
 .btn {
   display: inline-block;
-  padding: 7px 16px;
-  border: 1px solid var(--text);
-  border-radius: 0;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-size: 17px;
+  padding: 9px 18px;
+  border: 0;
+  border-radius: 3px;
+  background: var(--text);
+  color: var(--bg);
+  font: 500 16px var(--sans);
   cursor: pointer;
 }
 
 .btn:disabled {
+  background: var(--rule);
   color: var(--muted);
-  border-color: var(--rule);
   cursor: default;
 }
 
@@ -314,6 +339,7 @@ figcaption {
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, var(--link) 45%, transparent);
   cursor: pointer;
 }
 
@@ -324,24 +350,26 @@ figcaption {
 
 @media (max-width: 640px) {
   body {
-    font-size: 17px;
+    font-size: 18px;
   }
   h1 {
-    font-size: 1.9rem;
+    font-size: 2rem;
   }
-  .page {
-    padding: 0 18px;
+  .frame {
+    padding: 0 20px;
+  }
+  header.site {
+    flex-wrap: wrap;
+  }
+  header.site nav {
+    margin-left: 0;
+  }
+  main {
+    padding-top: 40px;
   }
   table {
     display: block;
     overflow-x: auto;
     white-space: nowrap;
-  }
-  dl.facts {
-    grid-template-columns: 1fr;
-  }
-  dl.facts dt {
-    border-bottom: 0;
-    padding-bottom: 0;
   }
 }

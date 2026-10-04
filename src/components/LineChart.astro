@@ -12,7 +12,7 @@ const path = pts => pts.map(([a, b], i) => `${i ? 'L' : 'M'}${sx(a).toFixed(1)},
   {y.ticks.map(t => (
     <g>
       <line class="grid" x1={pad.l} x2={w - pad.r} y1={sy(t)} y2={sy(t)} />
-      <text class="tick" x={pad.l - 8} y={sy(t) + 4} text-anchor="end">{t}</text>
+      <text class="tick" x={pad.l - 8} y={sy(t) + 4} text-anchor="end">{y.digits != null ? t.toFixed(y.digits) : t}</text>
     </g>
   ))}
   {x.ticks.map(t => (

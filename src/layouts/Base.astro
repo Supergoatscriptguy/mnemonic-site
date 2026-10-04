@@ -12,6 +12,7 @@ const full = title ? `${title}, Mnemonic` : 'Mnemonic, a chat model written in a
     <title>{full}</title>
     <meta name="description" content={description} />
     <meta name="author" content="Supergoatscriptguy" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <script is:inline>
       // before the first paint, so a remembered theme doesn't flash
       try {
@@ -21,17 +22,19 @@ const full = title ? `${title}, Mnemonic` : 'Mnemonic, a chat model written in a
     </script>
   </head>
   <body>
-    <header class="site page">
-      <a class="name" href="/">Mnemonic</a>
-      <a href="/#chapters">Chapters</a>
-      <a href="https://github.com/Supergoatscriptguy/Mnemonic">GitHub</a>
-      <a href="https://huggingface.co/SuperGoatScriptGuy/Mnemonic">Hugging Face</a>
-      <a href="https://ollama.com/supergoatscriptguy/mnemonic">Ollama</a>
-    </header>
-    <main class="page">
-      <slot />
-    </main>
-    <div class="page">
+    <div class="frame">
+      <header class="site">
+        <a class="name" href="/">Mnemonic</a>
+        <nav>
+          <a href="/#chapters">Chapters</a>
+          <a href="https://github.com/Supergoatscriptguy/Mnemonic">GitHub</a>
+          <a href="https://huggingface.co/SuperGoatScriptGuy/Mnemonic">Hugging Face</a>
+          <a href="https://ollama.com/supergoatscriptguy/mnemonic">Ollama</a>
+        </nav>
+      </header>
+      <main>
+        <slot />
+      </main>
       <footer class="site">
         Made by Supergoatscriptguy. The source is on <a href="https://github.com/Supergoatscriptguy/Mnemonic">GitHub</a>.
         The page follows your system's light or dark setting, or you can <button class="theme" type="button" id="theme">switch it</button>.

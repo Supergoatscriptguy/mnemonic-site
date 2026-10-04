@@ -1,6 +1,6 @@
 ---
-import Base from './Base.astro'
 import { existsSync } from 'node:fs'
+import Base from './Base.astro'
 import { chapters } from '../data/chapters.js'
 
 const { frontmatter } = Astro.props
@@ -11,22 +11,45 @@ const prev = chapters[i - 1]
 const next = chapters[i + 1]
 ---
 <Base title={frontmatter.title} description={frontmatter.lead}>
-  <article class="prose">
+  <article class="main chapter">
     <h1>{frontmatter.title}</h1>
+    <p class="lead">{frontmatter.lead}</p>
     <slot />
-    <p class="pager">
-      {prev && <>The previous chapter is {written(prev) ? <a href={`/${prev.slug}`}>{prev.title}</a> : `${prev.title} [TODO]`}. </>}
-      {next && <>Next comes {written(next) ? <a href={`/${next.slug}`}>{next.title}</a> : `${next.title} [TODO]`}.</>}
-      {!next && <>That's the last chapter. <a href="/">Back to the start</a>.</>}
-    </p>
+    <nav class="pager">
+      <div>
+        {prev && (written(prev) ? <a href={`/${prev.slug}`}>← {prev.title}</a> : <span>← {prev.title} [TODO]</span>)}
+      </div>
+      <div class="next">
+        {next
+          ? (written(next) ? <a href={`/${next.slug}`}>{next.title} →</a> : <span>{next.title} [TODO] →</span>)
+          : <a href="/">Back to the start →</a>}
+      </div>
+    </nav>
   </article>
 </Base>
 
 <style>
+  .chapter h1 {
+    margin-bottom: 0.5rem;
+  }
+  .lead {
+    font-style: italic;
+    color: var(--muted);
+    margin-bottom: 2.6rem;
+  }
   .pager {
-    margin-top: 4rem;
+    display: flex;
+    justify-content: space-between;
+    gap: 2rem;
+    margin-top: 4.5rem;
     padding-top: 1.2rem;
     border-top: 1px solid var(--rule);
+  }
+  .pager .next {
+    text-align: right;
+    margin-left: auto;
+  }
+  .pager span {
     color: var(--muted);
   }
 </style>

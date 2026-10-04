@@ -170,16 +170,13 @@ export default function Chat() {
   if (phase === 'idle' || phase === 'error') {
     return (
       <div className="demo">
-        <p>
-          Pick a model. Nothing downloads until you press the button, and nothing you type leaves your computer. The
-          engine that runs it is the hand-written WebAssembly from the last chapter.
-        </p>
         <ul className="models">
           {models.map(m => (
             <li key={m.id}>
               <label>
                 <input type="radio" name="model" checked={m.id === pick} onChange={() => setPick(m.id)} />
-                {m.name}, {cached[m.id] ? 'already downloaded' : `${mb(m.bytes)} MB`}
+                <span className="name">{m.name}</span>
+                <span className="size">{cached[m.id] ? 'downloaded' : `${mb(m.bytes)} MB`}</span>
               </label>
               {m.id === pick && <p className="about">{m.about}</p>}
             </li>
