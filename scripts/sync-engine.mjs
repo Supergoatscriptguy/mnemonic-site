@@ -4,7 +4,7 @@ import { copyFileSync, statSync } from 'node:fs'
 
 const repo = new URL('../../Mnemonic/', import.meta.url)
 const files = [
-  ['site/web/engine.wasm', 'engine.wasm'],
+  ['site/engine.wasm', 'engine.wasm'],
   ['datasets/tokenizer.bin', 'tokenizer.bin'],
 ]
 for (const [from, to] of files) {
