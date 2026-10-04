@@ -1,0 +1,157 @@
+---
+layout: ../layouts/Chapter.astro
+slug: 7-chat
+title: Teaching it to chat
+lead: How I fine-tuned the pretrained models on conversations, taught them their own name, and found two bugs that made a working model look as if it had learned nothing.
+---
+import Note from '../components/Note.astro'
+
+A pretrained model continues whatever text it's given. To get one that answers, I fine-tuned it on conversations and
+counted the loss only on the replies. The trainer barely changed. The work was in the data, and in two bugs that made
+the model look as if it had learned nothing, although neither of them was in the model.
+
+## The data and the template
+
+<Note>smol-smoltalk is what SmolLM2-135M-Instruct and SmolLM2-360M-Instruct were tuned on, so it was made for models about the size of mine.</Note>
+
+I had planned on SmolTalk, but while the 126M was still pretraining I switched to smol-smoltalk, Hugging Face's cut of
+it for models under a billion parameters. Its conversations are shorter, with no function calling and no hard math.
+It has 460,000 training conversations and 24,000 test ones (about 424M and 22M tokens) in the same Parquet layout, so
+the stage 2 tools read it unchanged.
+
+A conversation becomes `<|bos|>`, then for each message the role's special token, the content and `<|end|>`. The
+special tokens sit at the top of the 32,768-token vocabulary, so every id fits in 15 bits, and chat token files use
+bit 15 as a flag (MASKBIT) on the tokens the model should learn to write. `render_conv` sets it with
+`or word [rdi+rcx*2], MASKBIT` on every token of an assistant message, including its `<|end|>`, so the model also
+learns when to stop. On the GPU, the embedding kernel masks the flag off, and the cross-entropy kernel skips every row
+whose target doesn't have it, so those rows add no loss and get a zero gradient. The trainer divides by the number of
+flagged tokens, which makes the loss a mean over the replies alone.
+
+## Packing conversations into blocks
+
+The trainer reads rows of ctx + 1 tokens with a stride of ctx, so with chat data most rows would start partway into a
+conversation. `bin\chatpack` fixes that before training. It splits the chat token files into conversations at each
+`<|bos|>`, shuffles them and packs them into blocks of exactly ctx tokens. Each block takes the first unused
+conversation, then any of the following ones that still fit, and the rest is padded with `<|bos|>` tokens that are
+never targets. Every training row is then exactly one block that starts at a conversation. An input written as
+`identity.tok*20` goes in 20 times.
+
+The first version had a flaw I fixed later. 41% of smol-smoltalk conversations are longer than 1,024 tokens, and
+chatpack kept the first 1,024 of each, so the cut could land in the middle of a reply. That teaches the model that a
+reply can stop without `<|end|>`. Now chatpack walks back to the last flagged `<|end|>` that fits and keeps whole turns
+only. Packed at 2,048 for the 304M, that cut 2,333 conversations back to whole turns, dropped 4,181 whose first reply
+didn't fit, and filled 96.2% of the tokens.
+
+## Who it is
+
+A model trained only on smol-smoltalk has no idea what it's called, so I made data\identity.txt: 107 short
+conversations about its name, who made it, where the code is, what it's built from and what it can't do. Each message
+starts with `user:` or `assistant:`, and `bin\chatdocs` turns the file into the same .docs format that `bin\extract`
+makes from Parquet. Mixed in 20 times, it was 0.5% of the conversations and 0.03% of the tokens.
+
+For the 304M I made a bigger set of 2,121 conversations, 609 of them with several turns, covering greetings, its
+creator, the code and links, assembly, the architecture, the training, its limits and staying in character. Another
+199 sit in a separate file that's never trained on. A low loss on those means the model learned who it is, and not
+just a list of sentences.
+
+## The fine-tuning runs
+
+<Note>The 304M got its identity set 12 times over because the 126M's separate identity pass had seen about 3.2M identity tokens. Twelve copies of the bigger set come to about the same, spread through the whole run.</Note>
+
+For these runs, `init=` starts from a checkpoint's weights with fresh AdamW state, the validation loss counts only the
+flagged tokens, and the sample printed during training is asked as a user turn.
+
+| Run | Model | Starts from | Data | Learning rate | Steps | Time | Chat val loss |
+| --- | --- | --- | --- | ---: | ---: | ---: | ---: |
+| chat | 126M | main | smol-smoltalk + identity ×20, blocks of 1,024 | 2e-4 | 2,545 | about 80 min | 1.350 |
+| chatid | 126M | chat | identity ×500 in one smol-smoltalk file | 1e-4 | about 300 | about 10 min | 1.359 |
+| chat300 | 304M | stretch | smol-smoltalk + identity-300m ×12, blocks of 2,048 | 1e-4 | 2,968 | 3.4 h | 1.1959 |
+
+The chat run is one pass over 333M tokens. Its loss on the replies started at 2.2, and the validation loss went from
+1.67 at step 200 to 1.350 at the end. The 304M's figure is only roughly comparable, since it sees twice the context and
+was packed with whole turns.
+
+## Two bugs that looked like a bad model
+
+After the chat run, the 126M answered "Hi! Who are you?" with made-up people: "Hi, my Name: Sarah Rodrigue..." and
+"I am a non-geotechnic science module". I assumed it had seen too little identity data, grew identity.txt to 208
+conversations with lots of paraphrases, and ran a short second pass, chatid, with the identity set 500 times over in
+one smol-smoltalk file. Its loss on the packed identity blocks fell to 0.017, close to memorized, and its samples still
+made up personas.
+
+The first bug was in the packing. With so many repeats, chatpack put several identity conversations into the same
+block, and attention lets every token see everything earlier in its row. A conversation asking the model's name could
+find the answer in a twin earlier in the block, so the model learned to copy "I'm Mnemonic..." from the context, and a
+fresh chat has nothing to copy. I measured it with idval.tok, the identity set with each conversation alone at the
+start of its own block. The chat model scored 1.46 there and chatid 0.16, nowhere near 0.017.
+
+The fix is a `+` in front of an input file. Its conversations only ever go first into an empty block, and ordinary
+conversations fill the rest. chatpack keeps each conversation as a pointer and a length, and the flag lives in bit 62
+of the length:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/train/chatpack.asm#L361-L373">train/chatpack.asm</a>, lines 361 to 373. rcx is the candidate conversation, r12 counts the tokens already in the block, and btr clears bit 62 and leaves its old value in the carry flag.</Note>
+
+```nasm
+    cmp byte [rdi+rcx], 0
+    jne .skip
+    mov rax, rcx
+    shl rax, 4
+    mov rdx, [rsi+rax+CV_LEN]
+    btr rdx, 62                 ; a + conversation only goes into an empty block
+    jnc .len
+    test r12, r12
+    jnz .skip
+.len:
+    lea r14, [r12+rdx]
+    cmp r14, [ctx]
+    ja .skip
+```
+
+Rerun on the fixed packing, chatid reached 0.009 on idval.tok, and the general chat loss barely moved.
+
+The samples were still wrong, and that was the second bug. Greedy decoding on chatid did say "Mnemonic." and
+"Supergoatscriptguy.", but sampling with a temperature didn't. The trainer's sampler kept the top-k logits sorted in
+`topv` and turned them into weights in place, `exp((v_i - v_0) / temp)`. The first pass of that loop wrote exp(0) = 1
+over `v_0`, so every later weight was computed against 1 instead of the largest logit. Those weights came out huge
+next to the top choice's weight of 1, and every sample since the dev model had been drawn from the top-k minus the
+token the model liked best. Greedy decoding has only one candidate, which is why it worked and what gave the bug away.
+The loss numbers were never affected. The fix copies `v_0` to the stack first, so the frame grew from `sub rsp, 40` to
+`sub rsp, 56`, which with four pushes still comes to 8 modulo 16.
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/train/train.asm#L1447-L1461">train/train.asm</a>, lines 1447 to 1461. Before the fix there was no copy, and the subtraction read topv[0] directly.</Note>
+
+```nasm
+    xorpd xmm0, xmm0
+    movsd [rsp+32], xmm0        ; sum
+    movsd xmm0, [topv]
+    movsd [rsp+40], xmm0        ; the max
+    xor edi, edi
+.p:
+    cmp rdi, rbx
+    jae .draw
+    lea rax, [topv]
+    movsd xmm0, [rax+rdi*8]
+    subsd xmm0, [rsp+40]
+    divsd xmm0, [temp]
+    call math_exp
+    lea rax, [topv]
+    movsd [rax+rdi*8], xmm0
+```
+
+After that, "Hi! Who are you?" got "Hi! I'm Mnemonic, a small language model made by Supergoatscriptguy.", and
+paraphrases it had never seen worked too. Both bugs looked exactly like a model that hadn't learned, and measuring the
+loss the way the model would really be used is what told them apart.
+
+## What it can and can't do
+
+At a temperature of 0.7 the 126M explained photosynthesis, gave study tips and wrote a short poem about the ocean, all
+coherent and on topic. It leaned hard on earlier turns: after the poem, its study tips turned into ocean metaphors, so
+a new conversation between topics helps. "What's the link to your code?" got read as a request to write code, since
+that phrasing wasn't in the identity set.
+
+The 304M introduced itself as Mnemonic from about step 2,000 of its run. On the held-out identity conversations its
+loss is 2.46, against 4.25 for the base model. It gets its name, its creator, its size, its 10 billion training tokens
+and the repository link right, with small slips like "I is" or once quoting the 126M's 5 billion tokens. Side by side,
+both decoding greedily, it gets Lincoln's presidency right where the 126M called him the first president, and it
+explains rainbows with refraction where the 126M said reflection. Both write a correct `is_prime`, both are hopeless
+at math, and both state wrong facts with confidence.

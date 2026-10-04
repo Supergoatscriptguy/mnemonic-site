@@ -1,0 +1,192 @@
+---
+layout: ../layouts/Chapter.astro
+slug: 5-transformer
+title: A transformer in PTX
+lead: How I wrote a Llama-style model's forward and backward passes as PTX kernels launched from assembly, checked every one of them, and trained a 22M model on a billion tokens.
+---
+import LineChart from '../components/LineChart.astro'
+import Note from '../components/Note.astro'
+
+Stage 5 turned a fast matmul into a model that learns. model.asm reads the model's shape from the config, lays out
+the parameters and buffers on the GPU, and runs the forward and backward passes as a long string of kernel
+launches: matmuls from gemm.ptx, attention from attn.ptx, and everything else from ops.ptx. The rule from the start
+was that every fast kernel gets checked against a naive one, and the naive ones get checked against finite
+differences.
+
+## The model
+
+It's a Llama-style decoder. Each layer normalizes the residual stream with RMSNorm, computes queries, keys and
+values with one fused matmul, rotates the queries and keys with RoPE, and runs causal attention. A second RMSNorm
+feeds a SwiGLU MLP, whose gate and up projections are also one matmul. Attention is grouped-query: in the dev preset,
+6 query heads of 64 share 2 key/value heads. There are no biases, and the embedding matrix doubles as the output
+layer. Here is the attention half of a layer as model.asm launches it, with `rsi` pointing at the layer's table of
+buffers:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/model/model.asm#L1434-L1444">model/model.asm</a>, lines 1434 to 1444. MM's arguments are A, B, C, R, M, N, K and flags, and it computes C = R + A B^T.</Note>
+
+```nasm
+mov rcx, [rsi+LP_X]
+mov rdx, [rsi+LP_N1]
+mov r8, [rsi+LP_XN1]
+mov r9, [rsi+LP_RS1]
+call rmsnorm
+MM [rsi+LP_XN1], [rsi+LP_WQKV], [rsi+LP_QKV], 0, [cur_m], [mdl+MD_QKV], [mdl+MD_D], [mmbf]
+mov rcx, [rsi+LP_QKV]
+xor edx, edx
+call rope
+call attn_fwd
+MM [rsi+LP_Y], [rsi+LP_WO], [rsi+LP_X2], [rsi+LP_X], [cur_m], [mdl+MD_D], [mdl+MD_QD], 0
+```
+
+The residual stream x is kept in f32. In the last line R is x itself, so the output projection adds its result
+straight into the residual stream, and there's no separate kernel for the add.
+
+## Three ways to run it
+
+The same code in model.asm can run three ways, picked per operation:
+
+- Naive f32: plain kernels with everything in f32. It's only for the gradient check, where bf16 rounding would swamp
+  the finite differences.
+- Naive bf16: the same kernels on bf16 activations. This is the reference for the fast kernels.
+- Fast: `gemm_tc` and flash attention, which is what training uses.
+
+The small kernels in ops.ptx are memory bound and simple, so each one exists only once. The ones that touch
+activations (RMSNorm, RoPE, SwiGLU, cross-entropy) take a `pbf` flag. The kernel turns the flag into a predicate
+with `setp`, picks the element size with `selp`, and writes each load and store twice. For a load, that's `@%pb ld.global.u16` followed by a 16-bit
+shift left, which turns the bf16 into an f32, next to `@!%pb ld.global.f32`. Only one of each pair runs.
+
+The backward pass needs matmuls with an operand stored the other way round: dx = dy W, and dW = dy^T x. Instead of
+transposing anything in memory, `gemm_tc` takes layout flags and loads those tiles with `ldmatrix.trans`, which hands
+out the mma fragment for a matrix stored transposed. Transposed tiles are 32 k-rows of 128, padded to 272 bytes so
+they stay conflict free. They run at the same speed as the plain layout and give exactly the same bits as the plain
+layout fed pre-transposed data, because the same values land in the same fragments. Weight gradients also add up
+across micro-batches inside the matmul: with R = C, the accumulators start at the gradient so far instead of zero.
+
+## Flash attention
+
+<Note>flash_fwd uses 128 registers and 46 KB of shared memory, flash_dq 120 and 36 KB, flash_dkv 154 and 37 KB. None of them spill, and each fits 2 blocks per SM.</Note>
+
+The naive attention kernels write out the whole T×T score matrix for every head. `flash_fwd` never does. A block of 4
+warps takes 64 queries of one head, 16 per warp, and walks the key blocks up to the diagonal, keeping each row's
+running max and sum in registers (the online softmax). Keys and values stream through shared memory with `cp.async`
+in two stages, in rows of 64 bf16 padded to 72. The softmax works in log2 units because `ex2` is the exponential the
+hardware has: the scores get multiplied by log2(e)/√64 once, and each probability is 2^(s - max).
+
+A match between two layouts saves a trip through memory. The C fragments of two neighbouring 8-key score tiles are
+exactly the A fragment of one 16-key step, so the probabilities go from the score accumulators into the P × V
+multiply without touching memory:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/model/attn.ptx#L842-L849">model/attn.ptx</a>, lines 842 to 849. %s0 to %s7 hold the probabilities for 16 keys, and %o0 to %o7 are the first output accumulators.</Note>
+
+```ptx
+// O += P V, 16 keys at a time (tiles 2kk, 2kk+1 of P are the A fragment)
+cvt.rn.bf16x2.f32 %a0, %s1, %s0;
+cvt.rn.bf16x2.f32 %a1, %s3, %s2;
+cvt.rn.bf16x2.f32 %a2, %s5, %s4;
+cvt.rn.bf16x2.f32 %a3, %s7, %s6;
+ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%k0, %k1, %k2, %k3}, [%r48];
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o0, %o1, %o2, %o3}, {%a0, %a1, %a2, %a3}, {%k0, %k1}, {%o0, %o1, %o2, %o3};
+mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%o4, %o5, %o6, %o7}, {%a0, %a1, %a2, %a3}, {%k2, %k3}, {%o4, %o5, %o6, %o7};
+```
+
+`cvt.rn.bf16x2.f32` packs two floats into one register as bf16, with the even column in the low half. V is stored
+[key][head dim], which is the B operand the wrong way round, so it comes in through `ldmatrix.trans`. The forward
+also saves each row's log-sum-exp, which lets the backward recompute the probabilities directly.
+
+## The same bits every time
+
+No kernel uses a float atomic. Float addition isn't associative, so an atomic add that sums in whatever order the
+threads arrive gives slightly different bits from run to run. Instead every sum has one owner and a fixed order:
+
+- The attention backward is two kernels. `flash_dq` works per block of queries, and `flash_dkv` per block of keys,
+  looping over all the query heads that share that key/value head. The scores get recomputed in both, but no two
+  blocks ever add into the same number.
+- For the embedding backward, the CPU counting-sorts each micro-batch's rows by token: it counts every token in a
+  32,768-entry table, turns the counts into start offsets, and then places the rows. Each row of the embedding's
+  gradient has one writer, which adds its rows in order.
+- The RMSNorm weight gradient is partial sums per chunk of rows, then a sum per column. The gradient norm is partial
+  sums per block, then one sum in a fixed order.
+
+So two runs give identical bits, and a run that stops and resumes lands on exactly the same weights as one that
+never stopped.
+
+## Checking the gradients
+
+`test\grad` builds a tiny model with awkward sizes (2 layers, width 48, 4 query heads of 12 over 2 key/value heads,
+a vocabulary of 97) and runs the naive f32 path on 3 random sequences of 9 tokens. The loss at init has to come out
+near ln 97. Then, for every parameter tensor, it nudges the weights along a unit direction u and compares
+(L(w + εu) - L(w - εu)) / 2ε with g·u, once along the gradient and once along a random direction.
+
+The step size needed care. Noise in the f32 loss puts a floor of about 3e-5 on the measured derivative, and the norm
+weights have gradients around 1e-3, so a fixed small step mostly measures rounding. The test picks ε so the loss
+moves by about 2e-4, with a minimum of 1e-3. It ends by training one batch for 200 AdamW steps, which the model has
+to learn by heart. A second test, `test\model`, checks every fast kernel against its naive twin, and then the whole
+model.
+
+| Check | Result |
+| --- | --- |
+| Every tensor's gradient vs finite differences | within 3e-4, relative to the gradient's norm |
+| One AdamW step vs the same math on the CPU | 6e-8 max difference |
+| Gradient norm vs the CPU | 5e-7 relative |
+| Flash vs naive attention: y, dq, dk, dv | within one bf16 ulp of the max (3e-3 to 5e-3) |
+| Flash vs naive attention: log-sum-exp | 2e-7 |
+| Whole model, fast vs naive: loss | 6.23715 vs 6.23719 |
+| Whole model, fast vs naive: gradients | 3e-3 apart |
+
+## Feeding the GPU
+
+The trainer's job is to keep the GPU busy. It has two pinned host buffers for tokens, and while step k runs, the CPU
+reads step k+1's rows from the memory-mapped .tok files into the other buffer and sorts them for the embedding
+backward. Step k's loss and gradient norm come back with an asynchronous copy followed by an event, and the trainer
+only waits on that event once step k+1 is queued:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/train/train.asm#L735-L745">train/train.asm</a>, lines 735 to 745. r12 is the step k, ebx is k mod 2 (which buffer), and nrep is the next step whose numbers haven't been reported.</Note>
+
+```nasm
+mov ecx, ebx
+mov rdx, r12
+call launch
+lea rax, [r12+1]
+mov [step], rax
+; the step before is finished or close to it
+mov rcx, [nrep]
+cmp rcx, r12
+jae .check
+call report
+inc qword [nrep]
+```
+
+Just before this, the step's tokens go up with `cuMemcpyHtoDAsync`. `launch` queues the forward and backward of
+every micro-batch (8 of 16,384 tokens in the dev preset), AdamW, and the copies back, so when `report` waits on the
+previous step's event, the GPU still has all of step k ahead of it. Only validation, checkpoints and Ctrl+C make the
+CPU wait for the GPU to finish. A checkpoint holds the weights, Adam's m and v, the step, the data loader's
+position (a file and a token), the random number generator and the elapsed time. How it gets written safely is in
+the next chapter.
+
+## The dev run
+
+The first real run was the dev preset: 22M parameters, 1 billion tokens of FineWeb-Edu in 7,630 steps of 131,072
+tokens. It took 53 minutes at 315,000 tokens a second, or 43.9 TFLOPS. At this size the output layer is more than
+half the work, since its 32,768 × 384 weights are 12.6M of the 22M parameters. At step 1,514 I stopped it with a
+real Ctrl+C. The trainer saved, exited with code 2, and the restart carried on from there.
+
+<figure>
+  <LineChart
+    xLabel="step"
+    x={{ min: 0, max: 8000, ticks: [0, 2000, 4000, 6000, 8000] }}
+    y={{ min: 3.6, max: 5.6, ticks: [3.6, 4.0, 4.4, 4.8, 5.2, 5.6], digits: 1 }}
+    series={[
+      { name: 'dev', points: [[250, 5.48], [1250, 4.27], [2250, 4.06], [3250, 3.96], [4250, 3.89], [5250, 3.83], [6250, 3.78], [7250, 3.748], [7630, 3.745]] },
+    ]}
+  />
+  <figcaption>Validation loss of the dev run on held-out FineWeb-Edu, every 1,000 steps from step 250, and at the end.</figcaption>
+</figure>
+
+It finished at 3.745. A sample from the end of the run:
+
+> The best way to learn a new language is through learning new vocabulary. Learn new words, words and words from
+> other people. By reading this activity you'll enjoy the fun games to help your learners succeed!…
+
+The sentences hold together better than the ideas do, which is about right for 22M parameters. Two changes made
+before the next run, splitting the k dimension of the small weight-gradient matmuls and a cross-entropy that reads
+the logits only once, later took the dev preset to 381,000 tokens a second.

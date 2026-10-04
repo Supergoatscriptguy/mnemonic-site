@@ -1,0 +1,178 @@
+---
+layout: ../layouts/Chapter.astro
+slug: 1-foundations
+title: Foundations
+lead: How I wrote the small library that every later program links in, from printing floats to a thread pool, a progress bar and a Ctrl+C handler.
+---
+import Note from '../components/Note.astro'
+
+Without a C runtime there is no printf, no malloc, no fopen and no threads library. Stage 1 was writing my own
+versions of the parts I would need, once, in a folder called `lib\`. It has twelve .asm files and one include file,
+lib.inc, which declares every routine as an extern, holds the offsets of the shared structs, and defines a `say`
+macro that prints a string literal. A program calls `lib_init` first, which sets up the console, the timer, the CPU
+feature flags and the command line.
+
+## Printing numbers
+
+All output goes through WriteFile, so it still works when it's redirected to a file. At startup `con_init` asks
+GetConsoleMode whether the output is a real console. If it is, it turns on escape code processing and switches the
+code page to 65001 (UTF-8), and `con_restore` puts both back on exit, because the console belongs to the shell.
+
+The formatting routines write into a buffer and return a pointer to the end of what they wrote. Integers come out
+one digit at a time, lowest first. A 64-bit `div` costs 30 to 90 cycles, so the loop divides by ten with a
+multiply instead:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/lib/fmt.asm#L53-L66">lib/fmt.asm</a>, lines 53 to 66. rax holds the number and r10 walks backwards through a scratch buffer.</Note>
+
+```nasm
+    mov r11, 0xcccccccccccccccd ; ceil(2^67 / 10): x/10 = (x * this) >> 67
+.digit:
+    mov rcx, rax
+    mul r11
+    shr rdx, 3
+    lea rax, [rdx+rdx*4]
+    add rax, rax
+    sub rcx, rax                ; x - (x/10)*10
+    add cl, '0'
+    dec r10
+    mov [r10], cl
+    mov rax, rdx
+    test rax, rax
+    jnz .digit
+```
+
+`mul` leaves the 128-bit product in rdx:rax, so rdx already holds it shifted right by 64, and `shr rdx, 3` makes
+it 67. Then `lea` and `add` multiply the quotient back by ten to get the remainder.
+
+Floats reuse the integer printer. `fmt_fixed` multiplies the value by a power of ten, rounds it to an integer with
+`cvtsd2si`, and one integer divide splits that into the whole part and the fraction digits. Going the other way,
+`parse_float` collects the digits into one integer and then, for a negative exponent, divides by an exact power of
+ten from a table. That rounds once, so "0.1" and "3e-4" come out bit for bit as the closest double. Multiplying by
+a stored 10^-k would round twice, since 10^-k isn't exact itself.
+
+## Memory, files and settings
+
+`mem_alloc` is VirtualAlloc with MEM_COMMIT and MEM_RESERVE, which gives zeroed, page-aligned memory. The arena is
+a 32-byte struct (base, used, committed, reserved). It reserves a large range of address space up front, which
+costs nothing, and commits another megabyte whenever an allocation runs past what's committed.
+
+The file routines wrap CreateFileA, ReadFile and WriteFile. Those take 32-bit sizes, so `file_read` and
+`file_write` loop in 1 GB chunks. `file_map` maps a whole file read-only with CreateFileMappingA and MapViewOfFile.
+`file_replace` is a single MoveFileExA with MOVEFILE_REPLACE_EXISTING and MOVEFILE_WRITE_THROUGH. Writing a
+temporary file, flushing it and then replacing the real one means a crash leaves either the old file or the new
+one, which is how checkpoints get saved in chapter 6.
+
+`args_init` splits GetCommandLineA into argv. `cfg_load` reads a file of `key = value` lines, cutting the strings
+in place by writing zero bytes into the file's buffer, and `cfg_args` adds every `key=value` argument from the
+command line. Lookups search the list newest first, so when a program loads its config file before its arguments,
+the command line wins.
+
+## Timers and random numbers
+
+Timing uses QueryPerformanceCounter, which ticks at 10 MHz on current Windows. `time_init` stores one over the
+frequency, so turning ticks into seconds is a subtract and a multiply.
+
+The random number generator is xoshiro256\*\*. Its state is 32 bytes that the caller owns, so a program can have
+several streams and a checkpoint can save them. `rng_seed` fills the state with splitmix64, so similar seeds still
+give unrelated streams. `rng_float` keeps the top 53 bits, exactly what a double holds, and scales them into [0, 1).
+`rng_normal` uses the Box-Muller transform, which needs a logarithm and a cosine. Those come from the old x87
+floating-point unit, which has them built in (`fyl2x`, `fcos`). They're slow, but that's fine for per-step math
+like the learning rate schedule.
+
+## The thread pool
+
+<Note>The benchmark: 2^30 iterations of an imul and a popcnt, in chunks of 2^20.</Note>
+
+`pool_init` starts one worker per logical CPU. `par_for(fn, ctx, count, chunk)` calls
+`fn(ctx, start, end, thread)` over the range from 0 to count on every thread, the main thread included, and
+returns when it's all done. Each thread claims its next chunk with `lock xadd` on one shared counter, which sits
+alone on its own 64-byte cache line because every thread hammers it. There's no fixed split, so fast cores just
+come back for more. The Core Ultra 7 265F has 8 performance cores and 12 efficiency cores, and the threads on P
+cores ended up with about 60 chunks each against about 45 on the E cores, without any tuning.
+
+| Threads | Time (s) | Speedup |
+| ---: | ---: | ---: |
+| 1 | 0.295 | 1.0 |
+| 20 | 0.019 | 15.7 |
+
+In stage 1 the workers slept on Windows events between jobs. That was fine here, but too slow once the chat engine
+ran about 80 tiny jobs per token, and chapter 9 replaces it with workers that spin.
+
+## The progress bar
+
+The bar is four lines of text redrawn in place. Before each redraw, the escape sequence `ESC[4A` moves the cursor up
+four lines, and every line ends with `ESC[K`, which clears whatever the last draw left behind. The whole frame goes
+out in a single WriteFile, so it's never seen half drawn, at most ten times a second.
+
+The bar is 30 cells wide and fills in eighths of a cell. Unicode has a full block (U+2588) and partial blocks from
+U+258F for one eighth to U+2589 for seven, so n eighths is U+2590 minus n. In UTF-8 they're all e2 96 and one more
+byte:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/lib/progress.asm#L119-L134">lib/progress.asm</a>, lines 119 to 134. ecx is the number of full cells, eax the leftover eighths, edx the empty cells still to draw, and rdi the write position.</Note>
+
+```nasm
+.full:
+    test ecx, ecx
+    jz .part
+    mov dword [rdi], 0x8896e2   ; U+2588 full block, utf-8 e2 96 88
+    add rdi, 3
+    dec ecx
+    jmp .full
+.part:
+    test eax, eax
+    jz .rest
+    mov word [rdi], 0x96e2
+    mov cl, 0x90
+    sub cl, al                  ; U+258F..U+2589 are the 1/8..7/8 blocks
+    mov [rdi+2], cl
+    add rdi, 3
+    dec edx
+```
+
+The dword store writes four bytes (e2 96 88 and a zero) but rdi only moves three, so the next character covers the
+zero. When the output is redirected there's no bar, and `prog_line` writes the same numbers as one `key=value` line
+for the log file instead.
+
+## Ctrl+C and crashes
+
+`ctrlc_init` registers a handler with SetConsoleCtrlHandler, and Windows runs it on a new thread with the event
+type in ecx:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/lib/ctrlc.asm#L27-L42">lib/ctrlc.asm</a>, lines 27 to 42. lock bts sets bit 0 of stop_flag and puts its old value in the carry flag, in one atomic step.</Note>
+
+```nasm
+; windows calls this on a fresh thread. ecx = event type
+global ctrlc_handler
+ctrlc_handler:
+    sub rsp, 40
+    cmp ecx, 1
+    ja .closing                 ; 2 = window closed, 5/6 = logoff/shutdown
+    lock bts dword [stop_flag], 0
+    jc .force                   ; it was already set
+    mov eax, 1                  ; handled, don't kill us
+    add rsp, 40
+    ret
+.force:
+    call con_restore
+    say 13, 10, "forced exit", 13, 10
+    mov ecx, 130
+    call ExitProcess
+```
+
+The first Ctrl+C only sets `stop_flag`, and the main loop checks it after every step, saves and exits. A second one
+finds the bit already set and exits on the spot with code 130. A process also inherits the "ignore Ctrl+C" setting
+from whoever started it, so `ctrlc_init` first calls SetConsoleCtrlHandler with a null handler to turn that off.
+
+A crash handler joined them in stage 2, and the next chapter describes it.
+
+## Tests
+
+`test.bat` builds every test program and every tool, then runs the tests that check themselves. They share a few
+macros, like `check e, "name"`, which turns the flags from a compare into a pass or a fail, and each test exits
+with its number of failures. At the end of stage 1 that was 107 checks, which ran in about 7 seconds.
+
+The most involved one tests Ctrl+C with real console events. `bin\progress.exe` is a fake training loop with the
+progress bar, a log, autosaves and resume. The test starts it in a hidden console, and a helper copy of the test
+sends the Ctrl+C by calling FreeConsole, AttachConsole with the target's process id, and GenerateConsoleCtrlEvent.
+It checks that one Ctrl+C saves and exits partway through, that running it again finishes with the same step, loss
+and random number state, bit for bit, as a run that never stopped, and that two Ctrl+Cs exit with 130.

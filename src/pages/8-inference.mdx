@@ -1,0 +1,164 @@
+---
+layout: ../layouts/Chapter.astro
+slug: 8-inference
+title: Quantization and the CPU
+lead: How I shrank the trained model to int8 and int4, wrote a CPU engine and a console chat program to run it, and exported it so Ollama can run it too.
+---
+import Note from '../components/Note.astro'
+
+Training runs on the GPU, but I wanted the finished model to run on an ordinary CPU, in a console program that never
+touches the graphics card. Generating a token pushes one vector through every weight matrix, so the work is almost all
+matrix-vector products, and each one reads its whole matrix from memory. That makes the size of the weights the first
+thing to work on, and integer arithmetic the second.
+
+## The model file
+
+`bin\quantize` reads a training checkpoint and writes a .mnm model file. It starts with a 4 KB header: `MNMODEL1`, the
+shape, the RoPE base, the quantization type and the tokenizer's hash. The matrices follow in the order the forward pass
+uses them:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/chat/model.inc#L9-L17">chat/model.inc</a>, lines 9 to 17.</Note>
+
+```nasm
+; model file: this header, then the tensors, each starting on 64 bytes:
+;   E [V][D]                                  (tied: input embedding and output)
+;   per layer: Wqkv [QKV][D], Wo [D][QD], W13 [2F][D], W2 [D][F]
+;   the norm weights, f32: n1, n2 for every layer, then the final one
+; a matrix is stored by type:
+;   QT_F32: f32 [rows][cols]
+;   QT_Q8:  int8 [rows][cols], then f32 scale per row
+;   QT_Q4:  per group of 32 along a row, 16 bytes: byte j = (q_j+8) | (q_{j+16}+8) << 4,
+;           then f32 scale per group ([rows][cols/32])
+```
+
+The engine never copies the weights. `eng_load` maps the file with `CreateFileMappingA` and `MapViewOfFile` and fills
+in a 40-byte struct for each matrix with pointers into the mapping. Loading a model is reading the header and doing
+that pointer arithmetic, and Windows reads the pages in from disk the first time a token touches them.
+
+## Quantizing the weights and activations
+
+Both weight formats are symmetric. int8 has one f32 scale per row, the largest magnitude divided by 127. int4 has one
+f32 scale per group of 32 weights, the largest magnitude divided by 7, and stores each value plus 8 in a nibble. Byte j
+holds weight j in its low half and weight j + 16 in its high half, which makes unpacking cheap. The kernel loads a
+group's 16 bytes into xmm1, shifts a copy right by 4 with `vpsrlw`, puts the copy into the top half of ymm1 with
+`vinserti128`, and clears the high nibble of every byte with `vpand` against 0x0f. That leaves weights 0 to 15 in the
+low 16 bytes and 16 to 31 in the high 16, the same order as the activations, with no shuffle anywhere. A `vpsubb` then
+took the 8 back off, until chapter 9 found a way to skip it.
+
+The activations get quantized too, before every matrix-vector product, in groups of 32 with a scale each, so one large
+value only costs precision inside its own group. `qx_vec` scales 32 floats to fit in ±127, converts them with
+`vcvtps2dq`, and narrows them to bytes with `vpackssdw` and `vpacksswb`. Those pack instructions work on each 128-bit
+half separately, so the bytes come out in 4-byte pieces from alternating halves, and one `vpermd` puts them back in
+order. Every dot product is then int8 by int8 into int32, which is exact, and the floating point work happens once per
+group. Against the f32 product, an int8 matrix-vector product is off by 1.07% and an int4 one by 10.9%.
+
+## Three ways to take a dot product
+
+<Note>Chapter 9 picks the int4 scales by search instead of taking the largest value over 7, which closed 31% of int4's loss gap to full precision at the same size and speed.</Note>
+
+My CPU is a Core Ultra 7 265F, which has AVX2, FMA, AVX-VNNI and AVX-VNNI-INT8 but no AVX-512. `kern_pick` reads the
+feature bits that `cpu_detect` got from `cpuid` and takes the best path, and `kernel=avx2`, `kernel=vnni` or
+`kernel=vnni8` forces one so they can be compared. Each path is a branch of one NASM macro, and every matrix-vector
+function gets assembled three times:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/chat/kernels.asm#L63-L78">chat/kernels.asm</a>, lines 63 to 78. %2 holds 32 int8 weights, %3 is the address of 32 int8 activations, %4 is the path, and %1 receives eight int32 sums.</Note>
+
+```nasm
+%if %4 == 2
+    vpxor %1, %1, %1
+    {vex} vpdpbssd %1, %2, %3
+%elif %4 == 1
+    vmovdqu ymm14, %3
+    vpsignb ymm15, %2, %2
+    vpsignb ymm14, ymm14, %2
+    vpxor %1, %1, %1
+    {vex} vpdpbusd %1, ymm15, ymm14
+%else
+    vmovdqu ymm14, %3
+    vpsignb ymm15, %2, %2
+    vpsignb ymm14, ymm14, %2
+    vpmaddubsw ymm14, ymm15, ymm14
+    vpmaddwd %1, ymm14, ymm13
+%endif
+```
+
+With AVX-VNNI-INT8, `vpdpbssd` multiplies signed bytes by signed bytes and adds each group of four products into a
+32-bit lane, so the dot product is one instruction. Plain AVX-VNNI only has `vpdpbusd`, which wants one side unsigned.
+The trick is to move the sign across: `vpsignb` of w by itself gives the absolute value of w, and `vpsignb` of x by w
+negates x wherever w is negative. The products of those two are exactly w times x. The AVX2 path feeds the same pair
+to `vpmaddubsw`, which multiplies unsigned bytes by signed ones and adds adjacent pairs into 16 bits with saturation.
+Both sides stay within ±127, so a pair is at most 32,258 and never saturates. A `vpmaddwd` against 16-bit ones then
+adds those pairs into 32 bits.
+
+NASM caught me out here. It assembles `vpdpbssd` with the EVEX encoding from AVX10 unless the line starts with
+`{vex}`, and on this chip the EVEX form would fault with an invalid opcode. All three paths produce the same int32
+sums and share the float code after them, so their results match bit for bit. `test\infer` checks that, and checks the
+sums against the same integer math done in f64. The path mattered less than I expected: with int8 weights the 126M ran at 265 tokens a
+second on AVX2, 277 on AVX-VNNI and 279 on AVX-VNNI-INT8.
+
+## One token at a time
+
+`eng_step` runs one token through the model with the same math as the GPU's forward pass. Keys and values go into a
+KV cache of f32 laid out as [layer][position][kv dim], so a new turn only runs its new tokens, and while a prompt is
+fed in, only its last token computes logits. `par_for` splits each matrix-vector product over the thread pool by rows,
+about 8 chunks per thread with at least 4 rows in each, and attention runs one head per job.
+
+Softmax, SwiGLU's sigmoid and the sampler get their exponentials from `exp8`, which does 8 floats at a time with a
+Cephes polynomial and builds 2^n by shifting n + 127 into the exponent field. Its relative error is around 1e-7.
+
+The sampler applies the temperature over the whole vocabulary, keeps the 64 most likely tokens, then keeps the
+smallest set of those whose probability reaches top-p and draws one. The probabilities go into their own buffer, so
+the in-place mistake from the last chapter can't happen here.
+
+## The chat program
+
+`bin\chat` puts `<|user|>` before each line typed and `<|end|>` and `<|assistant|>` after it, then samples until the
+model produces a special token, normally `<|end|>`. The defaults are a temperature of 0.7, top-p of 0.9 and at most 400
+tokens a reply. `/reset` starts a new conversation, `/quit` leaves, and Ctrl+C stops a reply. With the 126M in int8 it
+printed 290 to 305 tokens a second.
+
+The reply streams out token by token, but the tokenizer works on bytes, so one UTF-8 character can be split across two
+tokens. `show` appends each token's bytes to a small buffer, walks back past continuation bytes to the last
+character's lead byte, and reads the character's length from it (below 0xC0 is one byte, below 0xE0 two, below 0xF0
+three, and four otherwise). If the character isn't complete, it prints everything before the lead byte and keeps the
+rest for the next token.
+
+## Checking it against the GPU
+
+`test\infer` builds a small random model and runs it both ways: on the CPU in f32, one token at a time through the KV
+cache, and through the GPU's forward pass. The logits agree to about 3e-7 of the largest one. On the real 126M chat
+model, `bin\chat eval=` gets a loss of 1.4324 in f32 on 8 validation rows, against 1.4325 from the trainer on the
+same rows.
+
+| File | Size | Loss on 8 val rows | Tokens a second |
+| --- | ---: | ---: | ---: |
+| f32 | 480 MB | 1.4324 | 121 |
+| int8 | 121 MB | 1.4327 | 277 |
+| int4 | 75 MB | 1.4903 | 309 |
+
+These speeds are on all 20 threads. int8 matches full precision at a quarter of the size, so it's the default, and
+int4 costs 0.06 of loss for 12% more speed. int4 barely beat int8 with 40% fewer bytes, so memory bandwidth wasn't the
+whole story, and chapter 9 later took them to about 420 and 550. The 304M behaves the same way: on 4 rows of 2,048
+tokens the trainer gets 1.1389, the CPU in f32 1.1388, int8 1.1398 (291 MB) and int4 1.1892 (181 MB).
+
+## GGUF and Ollama
+
+<Note>The .mnm files for both models are on <a href="https://huggingface.co/SuperGoatScriptGuy/Mnemonic">Hugging Face</a>, which is also where the browser demo downloads them from.</Note>
+
+`bin\gguf` writes a checkpoint as a GGUF v3 file in f32, f16, q8_0 or q4_0, for llama.cpp and Ollama. The model fits
+llama.cpp's "llama" architecture with no reordering, since my RoPE rotates (2i, 2i+1) pairs like llama.cpp's does.
+Wqkv gets cut into attn_q, attn_k and attn_v, W13 into ffn_gate and ffn_up, and there's no output.weight, because
+llama.cpp falls back to the token embedding when they're tied. The vocabulary goes in GPT-2 style, with every byte
+through GPT-2's byte-to-unicode map. llama.cpp insists that token texts are unique, so the 11 reserved specials are
+named `<|reserved_5|>` to `<|reserved_15|>`.
+
+The pre-tokenizer is the one thing that doesn't carry over. llama.cpp hardcodes its split patterns, and none splits
+digits one or two at a time like mine, so I used "llama-bpe" (one to three). Only numbers with 3 or more digits
+tokenize differently: "1969" becomes 196|9 instead of 19|69. To check the export, I ran the f32 GGUF under Ollama next
+to `bin\chat` on the f32 model file, and greedy decoding gave the same text, word for word, on 3 prompts of 60 tokens.
+
+`mkollama.bat` runs `bin\gguf` for q8_0, q4_0 and f16 and calls `ollama create` with chat\Modelfile, which holds the
+chat template, `<|end|>` as the stop token and the sampling defaults. The models are published as
+supergoatscriptguy/mnemonic, where `latest` is the 304M in q8_0 (324 MB), next to tags for its q4_0 and f16 versions
+and for the 126M. On the CPU with 10 threads, Ollama ran the 126M at about 390 tokens a second in q8_0 and 570 in q4_0,
+against 277 and 309 for `bin\chat`. That gap is what chapter 9 went after.

@@ -1,0 +1,171 @@
+---
+layout: ../layouts/Chapter.astro
+slug: 3-tokenizer
+title: The tokenizer
+lead: How I wrote a byte-level BPE tokenizer in assembly, trained it on 1 GB of FineWeb-Edu in 7 seconds, and ran it over 26 GB of text.
+---
+import Note from '../components/Note.astro'
+
+The model never sees text, only token ids. Mnemonic's tokenizer is byte-level BPE: it starts with the 256 byte
+values as its first tokens, and training learns 32,496 merges, each of which glues two existing tokens into a new
+one. With 16 special tokens on top that makes 32,768, and every model size uses the same vocabulary. Every id fits in
+15 bits, which leaves the top bit of a 16-bit token free for something else.
+
+## Splitting text into chunks
+
+Before BPE sees any text, a pre-tokenizer cuts it into chunks, and merges never cross from one chunk into the next.
+I used GPT-4's split pattern with one change I took from nanochat: numbers split into groups of 1 to 2 digits
+instead of up to 3. There's no regex engine, so `pretok_next` is the pattern written out by hand as a chain of
+branches. The tests show what it does. Each line splits the first string and expects the chunks in the second,
+joined by `|`:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/test/tok.asm#L94-L103">test/tok.asm</a>, lines 94 to 103. split is a macro that runs the pre-tokenizer on the string and checks the result.</Note>
+
+```nasm
+split "Hello world", "Hello| world"
+split "don't", "don|'t"
+split "I'll WE'RE they've", "I|'ll| WE|'RE| they|'ve"
+split "'sam", "'s|am"
+split "123456", "12|34|56"
+split "$9.99", "$|9|.|99"
+split "  hello", " | hello"
+split "hello!!!", "hello|!!!"
+split "(test)", "(test|)"
+split "a... b", "a|...| b"
+```
+
+The real pattern uses Unicode classes like `\p{L}` for letters, and I didn't want to carry Unicode tables around.
+ASCII goes through a 128-byte class table that NASM builds at assembly time with `%rep`. Any other character is
+decided from its first one or two UTF-8 bytes: it counts as a letter, except in the blocks that are mostly
+punctuation and symbols, which are U+0080 to U+00BF (lead byte 0xC2), U+2000 to U+2FFF (0xE2), U+3000 to U+303F
+(0xE3 0x80) and the emoji (0xF0 0x9F).
+
+## Counting words
+
+I trained the tokenizer on the first 1 GB of FineWeb-Edu, shards 0 to 3. Every thread counts the chunks in its
+share of the documents in its own hash table, and then the tables get merged into one. Chunks longer than 256 bytes,
+like base64, are left out of training. That left 1.54 million unique chunks, which I call words. Each word becomes a
+run of 16-bit tokens, its bytes to begin with, in one big array, with 0xFFFF between words so that no pair can span
+two of them.
+
+## The merge loop
+
+Every merge takes the most frequent adjacent pair (the smaller pair id wins a tie), makes it a new token, and
+rewrites every word that contains it. Recounting every pair for every merge is simple but slow, so the fast trainer
+does four things instead.
+
+First, it finds the words to rewrite with an AVX2 scan over all the tokens, split across the CPU's 20 threads.
+`vpcmpeqw` compares 16 tokens with the pair's first half, and the same 16 shifted along by one with its second half.
+`vpand` combines the two, `vpmovmskb` turns the result into a mask with 2 bits per token, and `tzcnt` finds the first
+hit:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/tokenizer/bpe.asm#L944-L959">tokenizer/bpe.asm</a>, lines 944 to 959. r13 points at the token array, rsi and rdi mark the start and end of this thread's words, and ymm1 and ymm2 hold the pair's two tokens in all 16 lanes.</Note>
+
+```nasm
+.scan:
+    cmp rsi, rdi
+    jae .done
+    vmovdqu ymm0, [r13+rsi*2]
+    vpcmpeqw ymm0, ymm0, ymm1
+    vmovdqu ymm3, [r13+rsi*2+2]
+    vpcmpeqw ymm3, ymm3, ymm2
+    vpand ymm0, ymm0, ymm3
+    vpmovmskb eax, ymm0
+    test eax, eax
+    jnz .hit
+    add rsi, 16
+    jmp .scan
+.hit:
+    tzcnt eax, eax
+    shr eax, 1                  ; 2 mask bits per u16
+```
+
+On a hit, the thread looks up which word that position belongs to, rewrites the word in place, and carries on
+scanning after it.
+
+Second, the pair counts change by exact deltas. Rewriting a word only changes the pairs that touch a merged spot, so
+the thread marks the merged positions, subtracts the word's count for every old pair touching a mark, and adds it for
+every new pair touching the new token.
+
+Third, the deltas collect in a small hash map per thread, and after the scan they get applied to the one shared pair
+table, so the threads never write to shared counts.
+
+Fourth, the next pair comes off a max-heap with lazy deletion. A pair only gets pushed when its count goes up. When
+an entry reaches the top, its count is checked against the table. If they agree, it's the winner. If the table's
+count is lower, the entry goes back in with the real count, and if it's higher, a newer entry for the same pair is
+already in the heap and this one gets dropped.
+
+## Checking the trainer
+
+The fast trainer has a naive twin (`naive=1`) that recounts everything for every merge. The test trains both on 2 MB
+of text for 600 merges and requires the same merges with the same counts. After the real run, the trainer recounts
+every pair from scratch, and the result has to match the table it kept up to date exactly. It also checks that the
+winning count never goes up: every new pair contains the new token, so its count can be at most that token's count,
+which was the previous maximum.
+
+| Training on 1 GB, 20 threads | Time |
+| --- | ---: |
+| Counting the words | 0.6 s |
+| Merging the per-thread tables | 0.7 s |
+| 32,496 merges, about 0.17 ms each | 5.4 s |
+| Total | 7.0 s |
+
+## The memeq bug
+
+Before I found this bug, the same run took 223 seconds. `memeq` compares two chunks whose hashes match. For a chunk
+shorter than 8 bytes it loads the 8 bytes that end where the chunk ends, so it never reads past the end of the text,
+then XORs the two loads and shifts away the bytes that aren't part of the chunk. The CPU is little endian, so the
+chunk sits in the high bytes of the load, and I had shifted left, which kept the low bytes, the ones before the chunk.
+
+So " the" after "of" and " the" after "in" counted as two different words. There were 5 times too many unique words,
+every copy had the same hash, and merging the tables went quadratic: 8 billion calls to `memeq`, taking 21 seconds.
+The fix shifts right instead:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/tokenizer/pretok.asm#L337-L344">tokenizer/pretok.asm</a>, lines 337 to 344. r10 and r11 point at the two chunks and rdx is their length.</Note>
+
+```nasm
+.short:
+    mov rax, [r10+rdx-8]
+    xor rax, [r11+rdx-8]
+    neg rdx
+    lea rdx, [rdx*8+64]
+    shrx rax, rax, rdx          ; the chunk is the top len bytes of that load
+    test rax, rax
+    ret
+```
+
+The merges came out identical before and after the fix. Splitting a word's count over several duplicate entries
+doesn't change any pair's total, so BPE can't tell the difference.
+
+## Special tokens and the chat template
+
+The 16 special tokens sit at the top of the vocabulary. 32752 is `<|bos|>`, followed by `<|user|>`,
+`<|assistant|>`, `<|system|>` and `<|end|>`, and the other 11 are reserved. That's where the 32,496 merges come
+from: 32,752 minus the 256 bytes. A plain document becomes `<|bos|>` and its text. A conversation becomes `<|bos|>`,
+then for each message the role's token, the content and `<|end|>`.
+
+In chat files the top bit of a token, which I call MASKBIT (0x8000), marks what the model should learn to produce:
+the assistant's content and its `<|end|>`. `render_conv` sets it with `or word [rdi+rcx*2], MASKBIT`, and the decoder
+strips it with `and eax, MASKBIT - 1`. The chat fine-tuning in chapter 7 only takes the loss on those tokens.
+
+## Encoding the whole dataset
+
+The trained tokenizer, `datasets\tokenizer.bin`, is a 32-byte header and the merges as 32-bit pairs. Loading it
+builds a hash table from each pair to its merge number. Encoding a chunk repeats one step: find the lowest numbered
+merge anywhere in the chunk and apply it everywhere, left to right, the same way training did. Most chunks are common
+words, so each thread keeps a cache of 65,536 entries for chunks of up to 48 bytes, and the tests check that cached
+and uncached encoding agree.
+
+`bin\tokenize` hands out blocks of 256 documents to the threads and writes a `.tok` file: a 64-byte header, then
+16-bit tokens. The header carries a hash of the tokenizer's merges, so the training loader can refuse a file made
+with a different tokenizer.
+
+<Note>The last shard, 01822, is held out for validation, with 54.6 million tokens. SmolTalk's training files came to 994 million.</Note>
+
+It runs at 500 to 750 MB/s per file, including the write, and all 103 files, 26 GB of text, took 59 seconds.
+FineWeb-Edu came out at 4.62 bytes per token and SmolTalk at 3.95, since conversations have more special tokens,
+code and math. Shards 0 to 91 gave 5.04 billion tokens for training.
+
+`bin\tokshow` prints any text with each token on its own background color. "Mnemonic" itself splits as
+`M|nem|onic`, and the vocabulary has some odd entries: token 28939 is " ArticlePubMedGoogle", because academic pages
+mash their link text together.

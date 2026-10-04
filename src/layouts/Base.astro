@@ -13,6 +13,11 @@ const full = title ? `${title}, Mnemonic` : 'Mnemonic, a chat model written in a
     <meta name="description" content={description} />
     <meta name="author" content="Supergoatscriptguy" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta property="og:type" content="article" />
+    <meta property="og:title" content={full} />
+    <meta property="og:description" content={description} />
+    <meta property="og:site_name" content="Mnemonic" />
+    <meta name="twitter:card" content="summary" />
     <script is:inline>
       // before the first paint, so a remembered theme doesn't flash
       try {

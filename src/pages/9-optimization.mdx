@@ -1,0 +1,199 @@
+---
+layout: ../layouts/Chapter.astro
+slug: 9-optimization
+title: Making it faster
+lead: How I measured where the time went on the CPU and the GPU, sped both up, and got better answers out of the same int4 files.
+---
+import Note from '../components/Note.astro'
+
+By the end of stage 8 everything worked, so stage 9 was about speed, and I measured before changing anything. On
+the CPU most of a token's time went to the thread pool rather than the arithmetic, and on the GPU no kernel was
+badly off but the card sat partly idle. The last section is about accuracy: better int4 weights at the same size.
+
+## The thread pool
+
+The console chat (`bin\chat`) splits each matrix-vector product across threads with `par_for` from
+lib\thread.asm. In stage 8 every worker slept on its own event: `par_for` called `SetEvent` 19 times, one after
+another, and then waited for the workers' done events with `WaitForMultipleObjects`. An empty `par_for` took 28.5
+microseconds, and a token through the 126M model runs about 81 of them, so 2.3 ms of a 3.6 ms token went to
+waking threads and waiting for them.
+
+Now a worker spins after a job, watching a 64-bit ticket for 2^20 ticks of `rdtsc` (about 0.3 ms) before it
+sleeps, and `par_for` only wakes workers that have raised their `asleep` flag. It also waits for items rather than
+threads, through a `done` counter, so a worker that Windows has parked holds nobody up unless it claimed a chunk.
+An empty `par_for` now takes 3 microseconds.
+
+The ticket is the job's generation in the top 32 bits and the next unclaimed item in the bottom 32. A worker
+claims a chunk by adding the chunk size to the whole ticket with `lock cmpxchg`:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/lib/thread.asm#L145-L158">lib/thread.asm</a>, lines 145 to 158. rsi holds the whole ticket and esi its low half, the next index.</Note>
+
+```nasm
+.grab:
+    mov rsi, [ticket]
+    mov r12, [job_n]
+    mov rdi, [job_chunk]
+    mov r14, [job_fn]
+    mov r15, [job_ctx]
+    mov eax, esi                ; next index
+    cmp rax, r12
+    jae .out
+    lea r13, [rax+rdi]          ; our end
+    lea rdx, [rsi+rdi]
+    mov rax, rsi
+    lock cmpxchg [ticket], rdx
+    jne .grab
+```
+
+The generation protects against a worker that shows up late, after the next job has rewritten `job_n` and
+`job_fn`. `par_for` closes the ticket (index 0xffffffff) before it touches those fields, and publishes the next one
+with `xchg`, a full barrier, only after writing them. So if the `cmpxchg` goes through, the fields the worker read
+belong to the job it claimed from. Closing the ticket had a trap: `or rax, 0xffffffff` sign-extends its 32-bit
+immediate and wipes the generation, so the code puts 0xffffffff in `ecx`, which zero-extends into `rcx`, and ORs
+that.
+
+## Fewer threads
+
+<Note>These CPU numbers were measured on one validation row while the 300M model trained on the GPU. With the GPU idle, the 126M int8 model later ran at about 540 tokens a second.</Note>
+
+With the pool fixed, more threads made things slower: the 126M int8 model did 417 tokens a second on 12 threads,
+383 on 16 and 212 on 20. A spinning worker that Windows bumps off its core still holds its chunk, and the token
+waits for it. A token is also memory bound, since it reads every weight once: the f32 model at 134 tokens a second
+already moves 68 GB/s, which is about all this machine's memory can do. `bin\chat` now defaults to three quarters
+of the logical CPUs, at most 12. The browser engine in the next chapter, written before this stage, had already
+peaked at 12 to 14 threads.
+
+## The matrix and attention kernels
+
+The matrix-vector kernels added every group of 32 into one `vfmadd231ps` chain per row, which waits 4 cycles a
+group. Two sums taking two groups a step made int4 13% faster, and int8, already limited by memory bandwidth,
+didn't change.
+
+The int4 nibbles are stored as 0 to 15 and mean `q - 8`. The old kernel subtracted 8 with `vpsubb` and then needed
+the int8 sign trick, since `vpmaddubsw` and AVX-VNNI's `vpdpbusd` multiply an unsigned operand by a signed one. But
+the nibbles are already unsigned, and (q - 8)·x = q·x - 8·sum(x). So they go in as they are, and each group's sums
+start from -8·sum(x), which is made once per vector with `vpmaddubsw` (8s against the activations) and then
+`vpmaddwd` against ones. That gained 5% on AVX2 and nothing on the VNNI paths.
+
+Attention was latency bound too: a key's score was one chain of eight FMAs over 64 floats, about 45 cycles a key.
+Now the query stays in ymm8 to ymm15 for the whole head, and four keys go at once as four independent chains,
+which three `vhaddps` fold together. The weighted sum of the values loops over keys into all 64 outputs, held in
+the same eight registers. The engine now requires 64-wide heads, and the f32 loss was still exactly 1.4324.
+
+Tokens a second for the 126M chat model, roughly, before and after:
+
+| Weights | Before | After |
+| --- | ---: | ---: |
+| f32 | 121 | 134 |
+| int8 | 277 | 420 |
+| int4 | 309 | 550 |
+
+Ollama, which runs llama.cpp, does about 390 with int8 and 570 with int4 on the same model.
+
+## Profiling the GPU
+
+To see where a training step's time went, I gave `gpu_launch` in gpu\cuda.asm a profiling mode. Between
+`gpu_prof_begin` and `gpu_prof_end` it records a CUDA event before every launch, along with the kernel and, for a
+matmul, its shape. `cuEventElapsedTime` between neighbouring events then gives each kernel's GPU time, and when
+profiling is off it costs one compare per launch. `bin\profile` runs one micro-batch and one optimizer step this
+way, with random weights, on one stream so the times add up.
+
+For the 300M, with micro-batches of 4 × 2,048 tokens, a step took 17.5 seconds. Matmuls were 68% of it at 63 to 91
+TFLOPS, flash attention 18.5% at 72 to 80, small kernels like the norms 13.5%, mostly at memory bandwidth already,
+and AdamW 0.1%.
+
+The weight-gradient matmuls looked slow at 72 to 77 TFLOPS, while the same code did 91 on the logits' weight
+gradient. That's wave quantization. The card has 70 SMs that fit 2 blocks each, so 140 output tiles of 128 × 128
+run at once. W13's gradient (5632 × 1024) is 352 tiles, or 2.5 waves, and W2's (1024 × 2816) is 176 tiles, or 1.26
+waves. Splitting K didn't help for outputs this big, because adding up the partial sums cost more than it saved.
+
+## A second CUDA stream
+
+In the backward pass dx carries down the layers in a strict chain, but nothing needs the weight gradients until
+the optimizer step. With `streams=2` the weight-gradient matmuls and the norm weights' gradients go on a second
+stream beside the chain.
+
+They only read, but stream 0 overwrites what they read a little later, so model\model.asm wraps them in helpers,
+all no-ops when `streams=1`. `fork` makes the second stream wait for stream 0's work so far, `on2` sends launches
+to it, `back` records an event after the reader and switches back, `waitfor` makes stream 0 wait for that event
+before reusing the buffer, and `join` waits for everything before the embedding's backward. Here's the MLP part of
+a layer:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/model/model.asm#L1554-L1562">model/model.asm</a>, lines 1554 to 1562. MM's arguments are A, B, the output C, a matrix R that it adds to, then M, N, K and flags.</Note>
+
+```nasm
+; mlp: x' = x2 + swiglu(norm(x2) W13^T) W2^T
+call fork
+MM [d_drest], [rsi+LP_W2], [d_dg], 0, [cur_m], [mdl+MD_F], [mdl+MD_D], [mmbftb]
+call on2
+MM [d_drest], [rsi+LP_G], [rsi+LP_G2], [rsi+LP_G2], [mdl+MD_D], [mdl+MD_F], [cur_m], MM_TA|MM_TB
+lea rcx, [ev_drest]
+call back
+lea rcx, [ev_dh]
+call waitfor
+```
+
+The first matmul is the dx side on stream 0, the second adds W2's gradient into its fp32 buffer on the second
+stream, and then stream 0 waits until the second stream has finished reading `dh` for the layer above before the
+SwiGLU backward overwrites it. The fork has to be recorded before the next matmul on stream 0, or the second
+stream waits for that matmul too. And the second stream must be created with `CU_STREAM_NON_BLOCKING`, because
+the model runs on the legacy default stream, which synchronizes with every blocking stream.
+
+Every kernel still gets the same inputs and adds them in the same order, so the gradients come out bit for bit the
+same. `test\model` checks that, `bin\profile stretch streams=2 check=5` compares all 304M gradients over five
+runs, and 40 steps of the tiny preset on two streams left 0 of 55M checkpoint bytes different.
+
+| 300M | One stream | Two streams |
+| --- | ---: | ---: |
+| Milliseconds per micro-batch | 274.2 | 252.9 |
+| Tokens a second | 29,900 | 32,400 |
+| TFLOPS | 63.5 | 68.8 |
+
+That's 8.4% faster, about 3.6 hours off the 300M run, which was halfway through by then. I paused it, rebuilt the
+trainer, and it resumed at step 9,535 on two streams.
+
+## Better int4 scales
+
+The original int4 quantizer, `q4_row`, gave each group of 32 weights the scale max|x| / 7 and rounded every weight
+to a whole number from -7 to 7. A nibble holds -8 to 7, so one level went unused, and the scale was never fitted
+to the group.
+
+`q4_row_fit` searches instead. For each group it tries 19 scales that put the biggest weight at -7.1, -7.2 and so
+on down to -8.9, so all 16 levels are in play, plus `q4_row`'s own. Each try rounds and clamps the group with
+SSE4.1, then refits the scale by least squares, d = Σxq / Σq². With that d the squared error is
+Σx² - (Σxq)² / Σq², and Σx² is the same for every try, so the winner has the largest (Σxq)² / Σq²:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/chat/quant.asm#L247-L257">chat/quant.asm</a>, lines 247 to 257. xmm1 is Σxq, xmm2 is Σq², and [rsp+32] is the best reduction so far.</Note>
+
+```nasm
+; with d = sum xq / sum q^2 the error is sum x^2 - (sum xq)^2 / sum q^2
+movss xmm3, xmm1
+mulss xmm3, xmm1
+divss xmm3, xmm2
+comiss xmm3, [rsp+32]
+jbe .tn
+movss [rsp+32], xmm3
+mov eax, [rsp+52]
+mov [rsp+36], eax
+divss xmm1, xmm2
+movss [rsp+40], xmm1
+```
+
+The scale can come out negative, but both engines just multiply by it, so neither
+engine nor the file format changed. The 300M quantizes in 5 seconds.
+
+<Note>The chat rows are 16 rows from smol-smoltalk's test split, 25,470 scored tokens for the 300M. The identity rows are 24 conversations the model never trained on.</Note>
+
+The squared weight error fell to 0.69 times max/7's, and the matrix-vector error against f32 went from 10.9% to
+7.5%. Validation losses:
+
+| Model and data | int8 | int4, max/7 | int4, fitted |
+| --- | ---: | ---: | ---: |
+| 300M, chat | 1.1628 | 1.2120 | 1.1965 |
+| 300M, held-out identity questions | 2.3505 | 2.4645 | 2.4458 |
+| 126M, chat | 1.2689 | 1.3197 | 1.3091 |
+
+The 300M in f32 scores 1.1620 on the same rows, so the fitted scales close 31% of the gap between int4 and full
+precision at the same size and speed. They're the default now, and `bin\gguf` uses them for Ollama's q4_0 too,
+with a smaller gain: llama.cpp's perplexity for the 300M on 1.6 MB of FineWeb-Edu was 24.27 for f16, 24.80 for its own q4_0
+and 24.75 with the fitted scales, since its q4_0 already used all 16 levels.

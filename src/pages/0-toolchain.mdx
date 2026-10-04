@@ -1,0 +1,142 @@
+---
+layout: ../layouts/Chapter.astro
+slug: 0-toolchain
+title: The toolchain
+lead: How I set up an assembler, a linker, a build script and a debugger on Windows, and got a 3 KB hello world running with no C runtime behind it.
+---
+import Note from '../components/Note.astro'
+
+The rule for this project is that everything is assembly: x86-64 in NASM syntax on the CPU, hand-written PTX on
+the GPU, and later hand-written WebAssembly in the browser. The finished programs use no C, no C runtime and no
+third-party libraries. The only code I didn't write is Windows itself, which I reach through kernel32 (and winhttp
+for downloads), and the NVIDIA driver's nvcuda.dll. Stage 0 was the smallest version of that: one source file in,
+one program out, and a line of text on the screen.
+
+## The tools
+
+<Note>The machine: an RTX 5070 Ti with 16 GB, a Core Ultra 7 265F (8 performance cores and 12 efficiency cores, 20 threads) and 32 GB of RAM.</Note>
+
+I installed NASM 3.02 with winget. For linking I chose link.exe from the Visual Studio 2026 Build Tools over
+GoLink, because it was already installed and it writes PDB debug files. The linker also needs kernel32.lib from
+the Windows SDK, but that file is only an import table: it tells the linker which names live in kernel32.dll and
+contains no code at all. The debugger is x64dbg, also from winget.
+
+The CUDA toolkit happens to be installed on this machine too, but nothing in the project uses it. The GPU code is
+PTX text, and the graphics driver compiles it when a program loads it.
+
+## Hello world with no C runtime
+
+A C program doesn't really start at `main`. The C runtime's startup code runs first and calls `main` once it has
+set things up. Without it, the linker's `/entry:start` option makes my label `start` the first instruction the
+program runs, and `/nodefaultlib` stops the linker from pulling in any C library. Everything the program does
+after that is a call into kernel32:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/test/hello.asm#L18-L32">test/hello.asm</a>, lines 18 to 32. The program ends with ExitProcess because there is nothing to return to.</Note>
+
+```nasm
+start:
+    sub rsp, 40                 ; 32 shadow + 8 to fix alignment (we enter at rsp = 8 mod 16)
+
+    mov ecx, -11                ; STD_OUTPUT_HANDLE
+    call GetStdHandle
+
+    mov rcx, rax
+    lea rdx, [msg]
+    mov r8d, msglen
+    lea r9, [written]
+    mov qword [rsp+32], 0       ; 5th arg goes above the shadow space
+    call WriteFile
+
+    xor ecx, ecx
+    call ExitProcess
+```
+
+GetStdHandle returns the console's output handle in rax. WriteFile takes five arguments: the handle, the text, its
+length, a pointer where it stores how many bytes it wrote, and a null pointer for overlapped I/O. The first four go
+in rcx, rdx, r8 and r9, and the fifth goes on the stack at `[rsp+32]`. The finished hello.exe was 3 KB.
+
+Two lines in this file matter more than they look. `default rel` at the top makes NASM address `msg` relative to
+the instruction pointer. Without it NASM emits 32-bit absolute addresses, which break once Windows loads the
+program above 4 GB, and with address space randomization it does that by default. And `call WriteFile` doesn't
+jump straight into kernel32. It lands on a stub the linker generates, `jmp [__imp_WriteFile]`, which reads the
+real address from the import table. `call [rel __imp_WriteFile]` would skip the stub, but that only matters in a
+hot loop.
+
+## The calling convention
+
+Every call into Windows, and every call between my own routines, follows the Win64 calling convention, and the
+assembler never warns me when I break it. These are the rules that come up all the time:
+
+- The first four integer or pointer arguments go in rcx, rdx, r8 and r9, and floating-point ones in xmm0 to xmm3.
+  The fifth and later go on the stack at `[rsp+32]`, `[rsp+40]` and so on. Results come back in rax or xmm0.
+- The caller reserves 32 bytes of shadow space just above the return address. The callee may use it however it
+  likes, and several of my routines park an argument there instead of pushing it.
+- rsp has to be a multiple of 16 at every `call`.
+- rax, rcx, rdx and r8 to r11 can be trashed by any call. rbx, rbp, rsi, rdi and r12 to r15 have to come back
+  unchanged.
+
+The entry point is entered as if it had been called, so at `start` there is already a return address on the
+stack and rsp is 8 more than a multiple of 16. `sub rsp, 40` fixes both things at once: 32 bytes of shadow space
+for the calls it makes, plus 8 to get back to a multiple of 16. In a routine that also pushes registers the
+pushes count too, so the check I run on every function is that pushes × 8 plus the `sub` comes to 8 modulo 16.
+Chapter 6 has the story of the one routine that got this wrong.
+
+<Note>Writing a 32-bit register zeroes the top half of the 64-bit one, so mov ecx, eax is a free zero-extend. Writing an 8-bit or 16-bit register doesn't do that.</Note>
+
+The bug I hit most often came from the register rules. A value left in rax or rdx is gone after the next call,
+including calls hidden inside my own macros, so anything that has to survive a call goes in a preserved register
+or on the stack.
+Even `cpuid` counts: it writes ebx, and rbx is one of the preserved registers, so the feature detection code pushes
+and pops it. Two habits follow from the rules. A tail call is a `jmp` to another routine with rsp untouched, so
+that routine's `ret` goes straight back to my caller. And a routine that never returns, like the one that prints
+an error and exits, can start with `and rsp, -16` and stop caring how it was reached.
+
+## The build script
+
+`build.bat test\hello` assembles test\hello.asm and links bin\hello.exe. NASM runs with `-f win64 -g -F cv8`,
+which makes a 64-bit object file with CodeView debug information. The linker runs with
+`/subsystem:console /entry:start /nodefaultlib /debug /incremental:no /map`, plus kernel32.lib. The script finds
+link.exe with vswhere, Visual Studio's own locator, so no version number is written into a path.
+
+From stage 1 on there is a shared library in `lib\`, and build.bat assembles every file in it and links all of
+them into every program, since the whole library is small. When the data pipeline arrived in stage 2, programs
+started to need modules from other folders, and the downloader needed winhttp.lib. Instead of a project file,
+each program lists what it needs in its own source, on lines like `; uses: data\parquet data\zstd`, and build.bat
+reads them:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/build.bat#L33-L46">build.bat</a>, lines 33 to 46. The MOD lines turn data\zstd into data_zstd for the object file's name.</Note>
+
+```bat
+rem anything else it needs is listed in the source:
+rem   ; uses: data\parquet data\zstd      (modules)
+rem   ; libs: winhttp.lib                 (extra import libs)
+set USES=
+set LIBS=
+for /f "eol=# tokens=1,* delims=:" %%a in ('findstr /b /c:"; uses:" "%SRC%"') do set USES=%%b
+for /f "eol=# tokens=1,* delims=:" %%a in ('findstr /b /c:"; libs:" "%SRC%"') do set LIBS=%%b
+rem module objects are named after their whole path, test\tok and tokenizer\tok can't collide
+for %%m in (%USES%) do (
+    set MOD=%%m
+    set MOD=!MOD:\=_!
+    %ASM% -o build\mod\!MOD!.obj %%m.asm || goto fail
+    set OBJS=!OBJS! build\mod\!MOD!.obj
+)
+```
+
+`findstr /b` finds the line that begins with `; uses:`, and `for /f` splits it at the first colon, so `%%b` is the
+list of modules. Batch files had a few traps of their own. `for /f` skips any line that starts with a semicolon,
+because that is its default end-of-line character, so the lookup needs `eol=#`. A variable named `LINK` would break the
+build, because link.exe reads `%LINK%` as extra command line options. And a .bat file
+saved with Unix line endings can make cmd fail to find its `goto` labels, so the repository's .gitattributes
+forces CRLF.
+
+## The debugger
+
+`debug.bat hello` opens bin\hello.exe in x64dbg. Because of the CodeView information and the PDB the linker
+writes, x64dbg shows my own labels instead of bare addresses. `/incremental:no` is there for the debugger too:
+without it the linker pads the program with jump thunks, which makes stepping through it confusing.
+
+The `/map` option, added in stage 2, writes a text file, bin\hello.map, that lists the address of every label in
+the program. That matters for crashes that happen without the debugger attached. The crash handler from chapter 2
+prints the faulting address as an offset into the exe, and the map file says which routine that offset
+belongs to.

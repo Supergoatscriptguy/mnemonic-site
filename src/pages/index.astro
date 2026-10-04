@@ -161,19 +161,9 @@ const flow = [
     font: 15px/1.5 var(--sans);
   }
   .flow li {
-    position: relative;
     margin: 0;
     padding-top: 12px;
     border-top: 1px solid var(--text);
-  }
-  .flow li:not(:last-child)::after {
-    content: '→';
-    position: absolute;
-    top: -0.85em;
-    right: -22px;
-    padding: 0 3px;
-    background: var(--bg);
-    color: var(--muted);
   }
   .flow .step {
     display: block;
@@ -226,14 +216,6 @@ const flow = [
     .flow {
       grid-template-columns: 1fr;
       gap: 18px;
-    }
-    .flow li:not(:last-child)::after {
-      content: '↓';
-      top: auto;
-      bottom: -1.35em;
-      right: auto;
-      left: 0;
-      background: none;
     }
     .toc li {
       grid-template-columns: 1fr;

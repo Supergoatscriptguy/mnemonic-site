@@ -1,0 +1,179 @@
+---
+layout: ../layouts/Chapter.astro
+slug: 10-browser
+title: In the browser
+lead: How I wrote the chat engine and tokenizer again in hand-written WebAssembly, so Mnemonic runs on a visitor's own CPU in a browser tab.
+---
+import Note from '../components/Note.astro'
+
+<Note>`.\build.bat site\engine` runs wat2wasm with `--enable-threads`. The assembled engine.wasm is committed to the repo, since the host that serves the page can't build it.</Note>
+
+The demo on this site's home page runs Mnemonic on your own CPU, inside the browser. No server does any of the
+work: the page downloads a model and a 9,867-byte WebAssembly module, and the module does the rest. I wrote that
+module by hand in WebAssembly's text format, site\engine.wat, and assemble it with wat2wasm from the WebAssembly
+Binary Toolkit, which does the job NASM does for the x86 code. It's a port of the x86 engine and tokenizer and
+reads the same model files and the same tokenizer.bin. JavaScript is only glue: the interface, the download, and
+the loop that calls the engine's exports. I built it before the optimization stage, so the comparisons here are
+with the x86 engine as it was then.
+
+## One memory, many workers
+
+WebAssembly threads are web workers that share a `WebAssembly.Memory` created with `shared: true`, each one
+instantiating the same module on it. Globals belong to an instance, though, so one worker can't see another's.
+All of the engine's state therefore lives in memory at fixed addresses, and the globals are just constants that
+name them, like `$POS` = 560 for the number of tokens in the KV cache. The thread pool's words sit at 64 to 320,
+the busiest each on its own 64-byte cache line, the engine's fields at 512 to 700, the tokenizer's at 768 to 800,
+and the sampler's top 64 at 1024 and 1280. From 4096 up, a bump allocator hands out 64-byte aligned blocks and
+grows the memory as needed.
+
+Data segments have the same problem. An active segment is copied into memory again on every instantiation, so
+each new worker would overwrite live state. The special token names are a passive segment instead, copied in with
+`memory.init` when the tokenizer loads.
+
+## A thread pool from atomics
+
+The pool hands out work like `par_for` in lib\thread.asm. One worker, the driver, runs the model step and the sampler. The others call the
+exported `helper` function and never return from it. A job is a function index, an item count and a chunk size.
+Every thread, the driver included, claims chunks with `i32.atomic.rmw.add` on a shared counter and runs them with
+`call_indirect`. The function table is indexed by quant type (0 f32, 1 int8, 2 int4) with attention at 3, so a
+matrix-vector product passes its matrix's type as the job. Here is a helper's loop:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/site/engine.wat#L147-L161">site/engine.wat</a>, lines 147 to 161. $seen is the last job this helper saw and $id is its number.</Note>
+
+```wasm
+(loop $forever
+  (local.set $g (i32.atomic.load (global.get $GEN)))
+  (if (i32.eq (local.get $g) (local.get $seen))
+    (then
+      (local.set $spin (i32.add (local.get $spin) (i32.const 1)))
+      (if (i32.gt_u (local.get $spin) (i32.const 100000))
+        (then (drop (memory.atomic.wait32 (global.get $GEN) (local.get $seen) (i64.const -1)))))
+      (br $forever)))
+  (local.set $seen (local.get $g))
+  (if (i32.lt_u (local.get $id) (i32.load (global.get $NHELP)))
+    (then
+      (local.set $spin (i32.const 0))
+      (call $work)
+      (if (i32.eq (i32.atomic.rmw.sub (global.get $LEFT) (i32.const 1)) (i32.const 1))
+        (then (drop (memory.atomic.notify (global.get $LEFT) (i32.const 1))))))
+```
+
+A helper spins on `GEN`, the job counter, for 100,000 rounds and then sleeps in `memory.atomic.wait32`, which only
+blocks while `GEN` still holds the value it last saw. The driver bumps `GEN`, wakes everyone with
+`memory.atomic.notify`, does its own share, and then waits on `LEFT` the same way. The last helper to finish takes
+`LEFT` to zero and notifies the driver. A helper reads `GEN` before it counts itself into `READY`, and the driver
+sets the number of helpers taking part, `NHELP`, from `READY`, so no job can start before its helpers are
+listening. Lowering the thread count between jobs just lowers `NHELP`, and the helpers above it go straight back
+to sleep.
+
+While it writes a reply the driver is in a plain loop and can't receive messages, so the stop button sets a flag
+in a separate four-byte SharedArrayBuffer, which the driver checks after every token.
+
+## Dot products and math
+
+WebAssembly's 128-bit SIMD has no int8 dot product. The closest is `i32x4.dot_i16x8_s`, the same operation as
+x86's `pmaddwd`: it multiplies eight pairs of int16 and adds neighbouring products into four int32. So the
+activations are quantized to int8 per group of 32 as on x86, but stored widened to int16, once per vector, and
+each 16 bytes of weights get sign-extended in two halves:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/site/engine.wat#L985-L994">site/engine.wat</a>, lines 985 to 994, the inner loop of the int8 matrix-vector product. $w points at the weights and $x at the int16 activations.</Note>
+
+```wasm
+(local.set $a (v128.load (local.get $w)))
+(local.set $d (i32x4.add
+  (i32x4.dot_i16x8_s (i16x8.extend_low_i8x16_s (local.get $a)) (v128.load (local.get $x)))
+  (i32x4.dot_i16x8_s (i16x8.extend_high_i8x16_s (local.get $a)) (v128.load offset=16 (local.get $x)))))
+(local.set $a (v128.load offset=16 (local.get $w)))
+(local.set $d (i32x4.add (local.get $d) (i32x4.add
+  (i32x4.dot_i16x8_s (i16x8.extend_low_i8x16_s (local.get $a)) (v128.load offset=32 (local.get $x)))
+  (i32x4.dot_i16x8_s (i16x8.extend_high_i8x16_s (local.get $a)) (v128.load offset=48 (local.get $x))))))
+(local.set $acc (f32x4.add (local.get $acc)
+  (f32x4.mul (f32x4.convert_i32x4_s (local.get $d)) (v128.load32_splat (local.get $xs)))))
+```
+
+A group of 32 weights takes four `dot_i16x8_s`. The int32 sums are exact, as they are on x86, and only then become
+floats, scaled by the activation group's scale.
+
+<Note>WebAssembly's relaxed SIMD extension has int8 dot products that would skip the widening. I haven't tried it yet.</Note>
+
+WebAssembly has no instructions for exp, log, sin or cos either, so those are mine too, in f64. exp splits x into
+k·ln 2 + r, runs a Taylor series on r, and makes 2^k by writing k + 1023 into the exponent bits. log takes the
+exponent out and runs the atanh series on the mantissa. sin and cos reduce the angle by π/2 in three parts (Cody
+and Waite's method, exact for the angles RoPE uses), run Taylor series, and pick the result by quadrant. They build
+the RoPE table when a model loads. The f32 exp in the softmax and SwiGLU is the same Cephes polynomial as the x86
+`exp8`, four lanes at a time.
+
+## Checking it against bin\chat
+
+site\test.mjs runs the wasm under Node exactly as the page does, with one driver and helpers in worker threads on
+one shared memory, and compares it with the x86 programs. The f64 math agrees with JavaScript's `Math` to about
+3e-16. The first 2,000 validation documents (9.6 MB) encode to the same 2,063,461 tokens that `bin\tokenize`
+wrote. The int8 126M's loss over a row of the chat validation set is 1.46229, against 1.4624 from `bin\chat eval`,
+and a greedy reply to "Hi! Who are you?" is the same text that `bin\chat temp=0` gives. test.bat runs it with the
+other tests.
+
+On the 300M the two engines agree in f32 (1.09281 against 1.0928 on one 2,048-token row, with identical greedy
+text), but in int8 they give 1.09228 and 1.0933. Each engine's int8 rounding lands about 0.0005 from f32, on
+opposite sides, which is just over the test's tolerance of 5e-4, so test.bat checks the 126M.
+
+## A bug in the x86 engine
+
+Porting turned up a bug in the original. Each head's attention scores go in their own row of one buffer, and
+different threads take different heads. The softmax runs `exp8` over 8 scores at a time, so it reads and writes up
+to 7 floats past the last real score. The rows were exactly T floats long, so at positions T - 7 and later those
+writes landed at the start of the next head's row, which another thread could be using. Now every row has 8 floats
+of padding:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/chat/engine.asm#L200-L206">chat/engine.asm</a>, lines 200 to 206, where the engine sizes its buffers.</Note>
+
+```nasm
+; a row of scores per head, padded: exp8 reads and writes up to 7 past the
+; last one, which without the padding lands in the next head's row (another thread's)
+mov rax, [eng+EN_T]
+add rax, 8
+imul rax, [eng+EN_H]
+mov r13, rax
+buf EN_ATT, r13
+```
+
+The WebAssembly engine pads its rows the same way, since its `exp4` runs up to 3 floats past.
+
+## Speed
+
+The 126M with int8 weights, under Node:
+
+| Threads | Tokens a second |
+| ---: | ---: |
+| 1 | 91 |
+| 2 | 138 |
+| 4 | 207 |
+| 8 | 278 |
+| 12 | 320 |
+| 14 | 326 |
+| 16 | 286 |
+| 18 | 226 |
+| 20 | 65 to 158 |
+
+One thread did 91 against the x86 engine's 100 or so. The best was about 325 at 12 to 14 threads, more than the
+x86 engine's 265 on all 20 at the time. With every core busy, one descheduled helper stalls a whole job, so the
+page uses three quarters of the cores by default, at most 16, and the settings can change that. In headless Edge
+the 126M was ready 3.3 seconds after starting its 121 MB download and replied at 310 to 386 tokens a second. The
+300M took 10.8 seconds to download its 291 MB and ran at 118 to 167 tokens a second on 15 threads.
+
+## Headers, Hugging Face and the cache
+
+Browsers only give a page shared memory when it's cross-origin isolated, which takes two response headers:
+`Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. This site sends them
+from vercel.json, and the dev server sends them from astro.config.mjs. With `require-corp`, anything loaded from
+another origin has to allow it, and Hugging Face, where the model files live, answers with CORS headers and exact
+sizes. A browser without isolation gets a message instead of a chat.
+
+The models are at <a href="https://huggingface.co/SuperGoatScriptGuy/Mnemonic">huggingface.co/SuperGoatScriptGuy/Mnemonic</a>.
+The driver opens a Cache API cache called `mnemonic-models` and looks for the model's URL there. A cached copy
+whose length doesn't match models.json is deleted. On a miss it downloads the file, stores a copy in the cache, and
+reads the response body chunk by chunk straight into wasm memory, at an address it got from `alloc`. The page sizes
+the shared memory up front, with a maximum of the model's size times 1.3 plus 256 MB.
+
+On the home page nothing downloads until you press the button. Unload terminates the driver and every helper, and
+with them the last references to the shared memory, so the browser can free it. Another button deletes the
+downloaded copy from the cache.

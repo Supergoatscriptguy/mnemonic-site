@@ -1,0 +1,158 @@
+---
+layout: ../layouts/Chapter.astro
+slug: 2-data
+title: The data pipeline
+lead: How I downloaded FineWeb-Edu and SmolTalk from assembly and got the text out of their Parquet files with my own Parquet reader and snappy and zstd decompressors.
+---
+import Note from '../components/Note.astro'
+
+The model learns from two datasets on Hugging Face: FineWeb-Edu for pretraining, and SmolTalk, a set of
+conversations, for the chat tuning later on. Both come as Parquet files, a column format with compression built in,
+and with nothing but the Windows API to call, I had to read them myself. The first thing I wrote was a reader for the
+file's footer, so I could see which codecs and encodings the files really use before writing any decompression code.
+
+## Downloading with WinHTTP
+
+WinHTTP comes with Windows, so `bin\download` can fetch the files from assembly. `download fineweb 0 3` gets shards 0
+to 3, a few at a time on the thread pool from chapter 1. WinHTTP wants its strings in UTF-16, so the constant ones
+are written with NASM's `__?utf16?__("...")`. For each file the program calls `WinHttpConnect` on port 443,
+`WinHttpOpenRequest` with the secure flag, `WinHttpSendRequest` and `WinHttpReceiveResponse`, and WinHTTP follows
+Hugging Face's redirect to its CDN on its own. `WinHttpQueryHeaders` gives the status and the length as numbers, and
+`WinHttpReadData` hands over the body in 1 MB pieces, which go into a `.tmp` file. Only a complete file gets renamed
+to its real name. Files that already exist are skipped, so after a failure I just run the same command again.
+
+## The footer and the Thrift compact protocol
+
+A Parquet file starts and ends with the four bytes `PAR1`. The footer sits right before the last four, followed by
+its own length, and it describes everything else: the schema, the row groups, and every column's codec, encodings
+and offsets. `pq_open` maps the whole file with `CreateFileMappingA` and `MapViewOfFile`, so finding the footer is a
+little pointer arithmetic from the end:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/data/parquet.asm#L569-L580">data/parquet.asm</a>, lines 569 to 580. rax is the start of the mapped file and rdx is its size.</Note>
+
+```nasm
+cmp rdx, 12
+jb .bad
+cmp dword [rax], 'PAR1'
+jne .bad
+cmp dword [rax+rdx-4], 'PAR1'
+jne .bad
+; ... footer, then its length (4 bytes), then PAR1
+mov ecx, [rax+rdx-8]
+lea rsi, [rax+rdx-8]
+sub rsi, rcx
+call p_filemeta
+call leaves
+```
+
+The footer is in Thrift's compact protocol. Each field starts with a byte holding the difference from the previous
+field's id in its high four bits and the type in its low four. Integers are zigzag varints: 7 bits per byte, with
+the lowest bit of the result holding the sign, which `shr rax, 1`, `and edx, 1`, `neg rdx` and `xor rax, rdx` undo.
+A bool keeps its value in the type nibble, except inside a list, where it takes a whole byte. Each struct gets a small
+parser, a recursive `skip` steps over the fields I don't need, and the results go into plain structs in an arena.
+
+`bin\pqinfo` prints all of this, and it showed me what I had to support. FineWeb-Edu uses zstd, plain values and RLE
+definition levels, in 52 row groups of 1,024 rows, which makes 53,248 documents and about 255 MB of text per shard.
+SmolTalk uses snappy, with dictionary pages and RLE_DICTIONARY values inside a nested list. So I needed two
+decompressors and nothing else.
+
+## Levels and the hybrid encoding
+
+Parquet stores nested data as flat columns, with two small numbers for every entry. A leaf's maximum definition
+level is the number of optional and repeated nodes on its path, and its maximum repetition level is the number of
+repeated ones, so SmolTalk's `messages.list.element.content` has 4 and 1. A repetition level of 0 starts a new row,
+which here is a new conversation. A definition level of 3 or more means the message exists, and 4 means its content
+isn't null either.
+
+Those levels, and the dictionary indices, use Parquet's RLE/bit-packed hybrid. Each run starts with a varint whose low
+bit says what follows. A 0 means one value repeated n times, which is a single `rep stosd`. A 1 means groups of 8
+values packed at a fixed bit width, and each value is one 8-byte load at the bit position divided by 8, then `shrx`
+by the position's low 3 bits and `bzhi` down to the width.
+
+The values themselves never get copied. Each one becomes a pointer and a length into the decompressed page or the
+dictionary. Every page has to decompress to exactly its stated size, and the level entries of all the pages have to
+add up to the column chunk's count, which catches most mistakes.
+
+## Snappy and zstd
+
+Snappy is 123 lines. After the output length, every element is a literal or a copy from earlier output. Copies use
+`rep movsb`, which goes byte by byte, so a copy that overlaps its own output repeats a pattern the way the format
+intends.
+
+<Note>One thread decodes a whole FineWeb-Edu file at 850 to 870 MB/s of text, and a SmolTalk file, with its snappy and dictionaries, at about 716 MB/s.</Note>
+
+Zstd is 1,386 lines: Huffman-coded literals, plus sequences coded with FSE, a table-driven entropy coder. Both
+decoders read their bit stream backwards, and the highest set bit of the last byte, which `bsr` finds, marks where the
+data begins. The reference decoder keeps a 64-bit container that it refills. I keep only a bit position that counts
+down, so reading n bits is a subtraction, one 8-byte load, a shift and a mask. Both of the last two are BMI2
+instructions: `shrx` shifts by a count in any register instead of only cl, and `bzhi` clears every bit from a given
+position up.
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/data/zstd.asm#L91-L103">data/zstd.asm</a>, lines 91 to 103. The rest of the macro handles a position that goes below 0 near the start of the stream.</Note>
+
+```nasm
+; rax = next ecx bits of a backward bitstream. r8 = its first byte, r9 = bit position
+; (counts down). bits below the start read as zero. uses rdx
+%macro getbits 0
+    sub r9, rcx
+    js %%neg
+    mov rdx, r9
+    shr rdx, 3
+    mov rax, [r8+rdx]
+    mov edx, r9d
+    and edx, 7
+    shrx rax, rax, rdx
+    bzhi rax, rax, rcx
+    jmp %%done
+```
+
+The load can reach up to 8 bytes past the end of a buffer, so every decode buffer gets 64 bytes of slack. Zstd also
+checks itself well: every bit stream has to end exactly on bit 0, and every frame has to come out at exactly its
+stated size, so one wrong bit anywhere makes one of those fail. To find where, a `failif` macro stores its own
+offset into the code in `zstd_err`, and a `nasm -l` listing maps that back to the source line.
+
+## Extracting the text
+
+`bin\extract` turns each Parquet file into a `.docs` file. The row groups are decoded in parallel, each thread with
+its own arenas and zstd context, and every document is checked for valid UTF-8. A `.docs` file is made to be memory
+mapped: a 64-byte header, an array of 64-bit offsets (document i runs from offset i to offset i+1), a role byte per
+message and the start of each conversation for chat files, and then all the text. `bin\docsinfo` checks a `.docs`
+file and prints a few documents, and `bin\pqcat` prints any single column with its levels.
+
+| Job | Time |
+| --- | ---: |
+| Decode one 255 MB FineWeb-Edu shard on 20 threads, with the UTF-8 check | 0.035 s |
+| Extract that shard, including the flushed write to disk | 0.4 s |
+| Download 88 shards, 8 at a time | 64 s |
+| Extract 98 files | 51 s |
+
+Decoding alone runs at about 7.3 GB/s, so most of an extract is the disk write, at about 640 MB/s.
+
+## Two bugs and a crash handler
+
+The bug that cost the most time was in zstd's Huffman tables. A table lists one weight per byte value, and I had
+capped the number of weights at 250, but UTF-8 text uses nearly every byte value, so a real table can list 255.
+
+The other one only showed up on the third file. `pq_open` filled in its struct without clearing it first, so the
+count of leaf columns kept going up from one file to the next, and the third file crashed. Now it clears the struct
+first:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/data/parquet.asm#L553-L558">data/parquet.asm</a>, lines 553 to 558. rcx is the struct, and rep stosq stores rax at rdi, rcx times.</Note>
+
+```nasm
+mov rdi, rcx
+mov rbx, rdx
+mov [pq_cur], rdi
+xor eax, eax                ; start clean, the struct may have held another file
+mov ecx, PQ_SIZEOF / 8
+rep stosq
+```
+
+Crashes like that are why `lib_init`, which my programs call at startup, installs a handler with `AddVectoredExceptionHandler`. On a
+fault it prints the exception code, the address as `exe+offset` to look up in the linker's map file, and the 16
+general registers. It only acts on faults inside my own executable, checked against `SizeOfImage` in the PE header,
+because system DLLs sometimes fault on purpose and handle it themselves. It has to be vectored, because my assembly
+has no unwind info, and without that, Windows' frame-based exception handling can't walk through my stack.
+
+By the end of this stage `test.bat` ran 127 checks, including hand-made snappy, RLE and zstd inputs, and the real
+files checked against their footers and the first rows that Hugging Face shows.

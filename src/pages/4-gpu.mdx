@@ -1,0 +1,200 @@
+---
+layout: ../layouts/Chapter.astro
+slug: 4-gpu
+title: Talking to the GPU
+lead: How I drove an NVIDIA card from assembly with no CUDA toolkit, ran my first PTX kernels, and measured what the card can really do.
+---
+import Note from '../components/Note.astro'
+
+Until stage 4 everything ran on the CPU. The usual way to program an NVIDIA GPU is the CUDA toolkit, with its C++
+compiler, headers and import libraries, and none of that was allowed in this project. Two things come with the
+graphics driver anyway: nvcuda.dll, which exports the CUDA driver API, and a compiler inside it for PTX, NVIDIA's
+assembly language for the GPU. Those two turned out to be all I needed.
+
+## Loading the driver by hand
+
+Without the toolkit there is no cuda.lib to link against, so `gpu_init` does the linker's job itself. It calls
+`LoadLibraryA("nvcuda.dll")`, then `GetProcAddress` once for each function, and stores every address in a table.
+Several functions are exported under versioned names (`cuMemAlloc` is really `cuMemAlloc_v2`), so the list has two
+columns: the name I call a function by, and the name the DLL exports it under.
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/gpu/cuda.asm#L16-L28">gpu/cuda.asm</a>, lines 16 to 28. The full list has 39 functions.</Note>
+
+```nasm
+%macro FUNCS 0
+    F cuInit,                   cuInit
+    F cuDriverGetVersion,       cuDriverGetVersion
+    F cuDeviceGet,              cuDeviceGet
+    F cuDeviceGetCount,         cuDeviceGetCount
+    F cuDeviceGetName,          cuDeviceGetName
+    F cuDeviceGetAttribute,     cuDeviceGetAttribute
+    F cuDeviceTotalMem,         cuDeviceTotalMem_v2
+    F cuDevicePrimaryCtxRetain, cuDevicePrimaryCtxRetain
+    F cuCtxSetCurrent,          cuCtxSetCurrent
+    F cuCtxSynchronize,         cuCtxSynchronize
+    F cuMemGetInfo,             cuMemGetInfo_v2
+    F cuMemAlloc,               cuMemAlloc_v2
+```
+
+The list is a macro, and the file expands it twice with two different definitions of `F`. In the read-only data
+section, `F` emits `db %str(%2), 0`, so the export names become one run of zero-terminated strings. In the .bss
+section, `F` emits `%1 resq 1`, an 8-byte slot named after the first column. `gpu_init` walks the strings with `rsi`
+and the slots with `rdi`, and since both come from the same list, a name can never end up paired with the wrong
+slot.
+
+## One macro for every call
+
+Every driver function returns a `CUresult`, and 0 means success. Rather than write a check after each call, I call
+them all through one macro:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/gpu/cuda.inc#L20-L33">gpu/cuda.inc</a>, lines 20 to 33.</Note>
+
+```nasm
+; call a driver function, and if it doesn't return CUDA_SUCCESS die with its
+; name and the driver's own words for what went wrong
+%macro CU 1
+    call [%1]
+    test eax, eax
+    jz %%ok
+    mov ecx, eax
+    lea rdx, [%%name]
+    call cu_fail
+    section .rdata
+    %%name db %str(%1), 0
+    section .text
+%%ok:
+%endmacro
+```
+
+`call [%1]` is an indirect call through the slot that `gpu_init` filled in. On failure the macro passes the error code
+in `ecx` and the function's name in `rdx` to `cu_fail`, which asks the driver to describe the error
+(`cuGetErrorName` and `cuGetErrorString`), prints it and exits. The name string is made right where the macro is
+used: it switches to `.rdata`, emits the string under a label local to this one expansion (`%%name`), and switches
+back to `.text`. So `CU cuMemAlloc` is one line in the source, and a failure prints `cuda: cuMemAlloc failed:`
+followed by the driver's own words.
+
+## A context, and PTX without a header
+
+`gpu_init` then takes device 0 and makes its primary context current, with `cuDevicePrimaryCtxRetain` and
+`cuCtxSetCurrent`. The kernels are plain .ptx files, which `kernels.asm` puts into the executable with NASM's
+`incbin`, each between a start label and an end label. A PTX file normally begins with a `.version` and a `.target`
+line, and mine don't.
+`gpu_init` reads the compute capability with `cuDeviceGetAttribute`, turns it into a number (12.0 becomes 120), and
+picks the newest entry in a small table that isn't newer than the card. On the 5070 Ti that's PTX ISA 8.7 and
+`sm_120`. `gpu_module` writes those two lines and `.address_size 64` in front of the source and hands the result to
+`cuModuleLoadDataEx`, which compiles it for this GPU. Anything older than compute capability 8.0, where bf16 tensor
+cores start, gets an error message instead.
+
+When the compiler rejects a kernel, its error log has the right message but line numbers 4 higher than in my file,
+because of the header. The driver also caches what it compiles under %APPDATA%, and I keep everything on my D:
+drive, so `gpu_init` sets `CUDA_CACHE_PATH` before it even loads the DLL. The compiler's "verbose" info log stays
+empty, so `bin\gpuinfo` gets each kernel's registers, shared memory and spills from
+`cuFuncGetAttribute`, and its occupancy from `cuOccupancyMaxActiveBlocksPerMultiprocessor`.
+
+## First kernels and first numbers
+
+The first PTX file, basic.ptx, has five small kernels: `vadd`, a 16-byte `copy16`, `f2bf` (f32 to bf16, rounded to
+nearest even), a `busy` loop of FMAs and an `empty` one for timing launches. `vadd` and `f2bf` match the CPU bit for
+bit. Then `bin\gpubench` measured the card:
+
+<Note>For each PCIe figure gpubench takes the best of 5 copies of 256 MB. The VRAM figure counts both the read and the write.</Note>
+
+| Test | Result |
+| --- | ---: |
+| PCIe 5.0 upload, pinned memory | 53.6 GB/s |
+| PCIe 5.0 download, pinned memory | 34.6 GB/s |
+| PCIe, pageable memory, either way | about 13 GB/s |
+| VRAM, `copy16` | 752 GB/s (84% of 896) |
+| Kernel launches, queued | 6.7 µs each |
+| Kernel launch and wait | 10.8 µs each |
+
+Launches are slow under WDDM, the Windows display driver model. The test that mattered most for later was the
+overlap: a pinned 256 MB upload took 5.0 ms, a kernel took 4.1 ms, and on two streams the pair took 5.0 ms together,
+so the kernel was completely hidden behind the copy.
+
+Half of the first gpubench output was `inf` and `0.00`. The Windows calling convention lets any function overwrite
+xmm0 to xmm5, and my `say` macro calls `WriteFile`, so a result kept in xmm0 across a printed label was gone by the
+time I printed it. Now floats go to the stack first. A related mistake happened twice: the 32 bytes from `[rsp]` to
+`[rsp+31]` belong to whatever function I call next, and a local I kept there got overwritten. One of those times it
+was a return address, and the program crashed.
+
+## The real tensor core peak
+
+`sm_120` has no `wgmma` or `tcgen05` (those belong to `sm_90a` and `sm_100a`), so the tensor core path is
+`mma.sync.m16n8k16`: one warp multiplies a 16×16 bf16 tile by a 16×8 one and adds into 16×8 fp32 accumulators.
+To find its peak I wrote `mma_peak`, in which every warp keeps 8 independent `mma.sync` chains going and touches no
+memory until the end. Each instruction is 2 × 16 × 8 × 16 = 4,096 flops. It came out at 102.9 TFLOPS, which only
+makes sense at a clock above the card's rated 2.45 GHz boost, so I measured the clock too. Thread 0 of block 0 reads
+`%clock64` (SM cycles) and `%globaltimer` (nanoseconds) before and after its loop, and the ratio is the clock it
+actually ran at: 2.87 GHz. Dividing by the whole kernel's time instead would be wrong once there's more than one
+wave of blocks, so the occupancy call sizes the grid to exactly one wave. 102.9 TFLOPS at 2.87 GHz on 70 SMs is 512
+flops per SM per clock, or 256 bf16 multiply-adds, which is GeForce's half rate for fp32 accumulation.
+
+## Fragments, ldmatrix and padding
+
+Each lane of the warp holds its own pieces of the three tiles in registers, in a fixed layout. Writing the lane
+number as 4g + t:
+
+- A (16×16) is 4 registers of 2 bf16 each: rows g and g+8, k pairs 2t and 2t+8.
+- B (16×8) is 2 registers: column g, k pairs 2t and 2t+8.
+- C (16×8) is 4 floats: rows g and g+8, columns 2t and 2t+1.
+
+A linear layer's weight is stored [N][K], one row per output, and that is exactly the "col" layout B wants, so
+every fragment register is one aligned 32-bit load. `gemm_mma1` does just that, straight from global memory:
+
+<Note>From <a href="https://github.com/Supergoatscriptguy/Mnemonic/blob/main/gpu/gemm.ptx#L119-L134">gpu/gemm.ptx</a>, lines 119 to 134. %rd5 and %rd7 point at rows g and g+8 of A, and %rd9 at row g of W.</Note>
+
+```ptx
+kloop:
+    setp.ge.u32     %p, %r15, %r3;
+    @%p bra         store;
+    ld.global.b32   %r16, [%rd5];               // a0: row g,   k 2t..
+    ld.global.b32   %r17, [%rd7];               // a1: row g+8, k 2t..
+    ld.global.b32   %r18, [%rd5+16];            // a2: row g,   k 2t+8..
+    ld.global.b32   %r19, [%rd7+16];            // a3: row g+8, k 2t+8..
+    ld.global.b32   %r20, [%rd9];               // b0: n g, k 2t..
+    ld.global.b32   %r21, [%rd9+16];            // b1: n g, k 2t+8..
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32
+        {%f0, %f1, %f2, %f3}, {%r16, %r17, %r18, %r19}, {%r20, %r21}, {%f0, %f1, %f2, %f3};
+    add.u64         %rd5, %rd5, 32;
+    add.u64         %rd7, %rd7, 32;
+    add.u64         %rd9, %rd9, 32;
+    add.u32         %r15, %r15, 16;
+    bra             kloop;
+```
+
+`gemm_tc` is the real one. A block of 256 threads computes a 128×128 tile of C, going through K 32 at a time. Its 8
+warps are arranged 2 × 4, so each warp owns 64×32 of C, which is 16 mma tiles and 64 accumulator registers per
+thread. `cp.async` copies tiles from global to shared memory 16 bytes at a time without going through registers, in
+two stages, so the next k tile streams in while the current one is being multiplied. `ldmatrix.x4` then loads four
+8×8 matrices from shared memory and hands them out already in the fragment layout. For A, lane i supplies the
+address of row i % 16, column (i / 16) × 8.
+
+Shared memory has 32 banks of 4 bytes, and one `ldmatrix` reads 8 rows of 16 bytes. With rows of 32 bf16 (64 bytes),
+rows 0, 2, 4 and 6 all start in the same banks, and their reads conflict. Padding each row to 40
+bf16 (80 bytes) puts the 8 rows in 8 different groups of 4 banks, so there are no conflicts, and 80 is still a
+multiple of 16, so `cp.async` keeps its 16-byte alignment. `gemm_tc` uses 96 registers and 40,960 bytes of shared
+memory with no spills, and shared memory limits it to 2 blocks per SM.
+
+## The first matmuls
+
+All three compute C = A W^T with bf16 inputs and an f32 result. The last five rows use the main model's real
+shapes, for 16 sequences of 1,024 tokens.
+
+| Kernel | Shape (M × N × K) | TFLOPS |
+| --- | --- | ---: |
+| `gemm_ref`, plain FMA | 4096³ | 0.7 |
+| `gemm_mma1`, no tiling | 4096³ | 17.0 |
+| `gemm_tc` | 4096³ | 87.9 |
+| `gemm_tc` | 8192³ | 66.6 |
+| `gemm_tc`, qkv | 16384 × 1280 × 768 | 82 |
+| `gemm_tc`, attention out | 16384 × 768 × 768 | 82 |
+| `gemm_tc`, MLP up | 16384 × 4096 × 768 | 87 |
+| `gemm_tc`, MLP down | 16384 × 768 × 2048 | 87 |
+| `gemm_tc`, logits | 16384 × 32768 × 768 | 61.9 |
+
+87.9 TFLOPS is 85% of the measured peak. The shapes with a large N lose to L2 cache misses (the blocks aren't
+swizzled yet) and to writing C as f32. `gemm_ref` matches the CPU bit for bit, and `gemm_mma1` and `gemm_tc` match
+`gemm_ref` to within 1e-7 to 7e-6 relative, with the error growing with K, as it should when fp32 sums are added in
+a different order. The matmuls of a whole forward pass of the main model ran at 79.7 TFLOPS, which put 5 billion
+tokens at about 14.5 hours of pure matmul.

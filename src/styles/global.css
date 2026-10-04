@@ -59,6 +59,7 @@ body {
   font: 400 19px/1.62 var(--serif);
   font-optical-sizing: auto;
   font-variant-numeric: oldstyle-nums proportional-nums;
+  overflow-wrap: break-word;
 }
 
 a {
@@ -250,6 +251,7 @@ pre {
   background: var(--tint);
   padding: 0.1em 0.3em;
   border-radius: 2px;
+  overflow-wrap: anywhere;
 }
 
 pre {
