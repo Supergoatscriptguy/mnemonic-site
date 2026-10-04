@@ -1,9 +1,8 @@
 ---
 import '../styles/global.css'
 
-const { title, description = 'A chat language model written entirely in assembly, trained on one gaming GPU.' } = Astro.props
-const full = title ? `${title} · Mnemonic` : 'Mnemonic: a chat model written in assembly'
-const here = Astro.url.pathname
+const { title, description = 'A chat language model written in assembly and trained on one gaming GPU.' } = Astro.props
+const full = title ? `${title}, Mnemonic` : 'Mnemonic, a chat model written in assembly'
 ---
 <!doctype html>
 <html lang="en">
@@ -22,28 +21,22 @@ const here = Astro.url.pathname
     </script>
   </head>
   <body>
-    <header class="site">
-      <div class="wrap">
-        <a class="wordmark" href="/">Mnemonic</a>
-        <nav class="site">
-          <a href="/#chapters" aria-current={here !== '/' ? 'page' : undefined}>Chapters</a>
-          <a href="https://github.com/Supergoatscriptguy/Mnemonic">GitHub</a>
-          <a class="hide-small" href="https://huggingface.co/SuperGoatScriptGuy/Mnemonic">Hugging Face</a>
-          <a class="hide-small" href="https://ollama.com/supergoatscriptguy/mnemonic">Ollama</a>
-          <button class="theme" type="button" id="theme">Theme</button>
-        </nav>
-      </div>
+    <header class="site page">
+      <a class="name" href="/">Mnemonic</a>
+      <a href="/#chapters">Chapters</a>
+      <a href="https://github.com/Supergoatscriptguy/Mnemonic">GitHub</a>
+      <a href="https://huggingface.co/SuperGoatScriptGuy/Mnemonic">Hugging Face</a>
+      <a href="https://ollama.com/supergoatscriptguy/mnemonic">Ollama</a>
     </header>
-    <main>
+    <main class="page">
       <slot />
     </main>
-    <footer class="site">
-      <div class="wrap">
-        <span>Made by Supergoatscriptguy</span>
-        <a href="https://github.com/Supergoatscriptguy/Mnemonic">Source</a>
-        <span class="right">x86-64 · PTX · WebAssembly</span>
-      </div>
-    </footer>
+    <div class="page">
+      <footer class="site">
+        Made by Supergoatscriptguy. The source is on <a href="https://github.com/Supergoatscriptguy/Mnemonic">GitHub</a>.
+        The page follows your system's light or dark setting, or you can <button class="theme" type="button" id="theme">switch it</button>.
+      </footer>
+    </div>
     <script is:inline>
       document.getElementById('theme').addEventListener('click', () => {
         const root = document.documentElement

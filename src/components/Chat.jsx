@@ -89,7 +89,7 @@ export default function Chat() {
     const handlers = {
       progress: ({ got, total, cached }) => setProgress({ got, total, cached, rate: got / Math.max(0.001, (performance.now() - t0) / 1000) }),
       ready: ({ threads, info }) => {
-        setStatus({ threads, quant: ['f32', 'int8', 'int4'][info.quant] })
+        setStatus({ threads, quant: ['f32', 'int8', 'int4'][info.quant], bytes: mem.buffer.byteLength })
         setPhase('ready')
         setCached(c => ({ ...c, [pick]: true }))
       },
@@ -98,10 +98,10 @@ export default function Chat() {
         return [...m.slice(0, -1), { ...last, text: last.text + text }]
       }),
       done: ({ n, secs, stopped, note }) => {
-        const rate = n > 1 ? `${n} tokens · ${(n / secs).toFixed(1)} tok/s` : `${n} token${n === 1 ? '' : 's'}`
+        const rate = n > 1 ? `${n} tokens at ${(n / secs).toFixed(1)} tokens a second` : `${n} token${n === 1 ? '' : 's'}`
         setMsgs(m => {
           const last = m[m.length - 1]
-          return [...m.slice(0, -1), { ...last, meta: rate + (stopped ? ' · stopped' : ''), note }]
+          return [...m.slice(0, -1), { ...last, meta: rate + (stopped ? ', stopped early' : ''), note }]
         })
         setBusy(false)
       },
@@ -169,32 +169,26 @@ export default function Chat() {
 
   if (phase === 'idle' || phase === 'error') {
     return (
-      <div className="demo gate">
-        <p className="demo-about">
-          A small demo that runs entirely on your device. The model downloads once, then everything happens
-          locally in WebAssembly, and nothing you type is sent anywhere.
+      <div className="demo">
+        <p>
+          Pick a model. Nothing downloads until you press the button, and nothing you type leaves your computer. The
+          engine that runs it is the hand-written WebAssembly from the last chapter.
         </p>
-        <fieldset className="models">
-          <legend className="label">Model</legend>
+        <ul className="models">
           {models.map(m => (
-            <label key={m.id} className={m.id === pick ? 'model on' : 'model'}>
-              <input type="radio" name="model" checked={m.id === pick} onChange={() => setPick(m.id)} />
-              <span className="model-name">{m.name}</span>
-              <span className="model-size">{cached[m.id] ? 'downloaded' : `${mb(m.bytes)} MB`}</span>
-              <span className="model-about">{m.about}</span>
-            </label>
+            <li key={m.id}>
+              <label>
+                <input type="radio" name="model" checked={m.id === pick} onChange={() => setPick(m.id)} />
+                {m.name}, {cached[m.id] ? 'already downloaded' : `${mb(m.bytes)} MB`}
+              </label>
+              {m.id === pick && <p className="about">{m.about}</p>}
+            </li>
           ))}
-        </fieldset>
-        {error && <p className="demo-error">{error}</p>}
-        <div className="gate-actions">
-          <button className="btn" onClick={start}>
-            {cached[pick] ? 'Start' : 'Download and start'}
-            <span className="dim">{cached[pick] ? 'already downloaded' : `${mb(model.bytes)} MB`}</span>
-          </button>
-          {cached[pick] && <button className="link" onClick={forget}>Delete the downloaded copy</button>}
-        </div>
-        <p className="demo-note">
-          It uses about {mb(model.bytes + (160 << 20))} MB of memory while it's loaded, and you can unload it at any time.
+        </ul>
+        {error && <p className="error">{error}</p>}
+        <p className="actions">
+          <button className="btn" onClick={start}>{cached[pick] ? 'Start' : `Download and start (${mb(model.bytes)} MB)`}</button>
+          {cached[pick] && <button className="textbtn" onClick={forget}>Delete the downloaded copy</button>}
         </p>
       </div>
     )
@@ -203,51 +197,48 @@ export default function Chat() {
   if (phase === 'loading') {
     const p = progress || { got: 0, total: model.bytes }
     return (
-      <div className="demo gate">
-        <p className="demo-about">
-          {p.cached ? `Loading ${model.name} from your browser's cache…` : `Downloading ${model.name}…`}
+      <div className="demo">
+        <p>
+          {p.cached ? `Loading ${model.name} from your browser's cache.` : `Downloading ${model.name}: ${mb(p.got)} of ${mb(p.total)} MB`}
+          {!p.cached && p.rate > 0 ? `, ${(p.rate / 1048576).toFixed(1)} MB a second.` : ''}
         </p>
         <div className="bar"><div style={{ width: `${(100 * p.got) / p.total}%` }} /></div>
-        <div className="bar-meta">
-          <span>{mb(p.got)} of {mb(p.total)} MB{!p.cached && p.rate > 0 ? ` · ${(p.rate / 1048576).toFixed(1)} MB/s` : ''}</span>
-          <button className="link" onClick={unload}>Cancel</button>
-        </div>
+        <p><button className="textbtn" onClick={unload}>Cancel</button></p>
       </div>
     )
   }
 
   return (
     <div className="demo live">
-      <div className="live-head">
-        <span className="live-status">
-          {model.name.replace(', small download', '')} · {status?.quant} · {status?.threads} thread{status?.threads === 1 ? '' : 's'} · on your device
-        </span>
-        <button className="link" onClick={newChat} disabled={busy}>New chat</button>
-        <button className="link" onClick={unload}>Unload</button>
-      </div>
+      <p className="status">
+        {model.name.replace(', smaller download', '')} with {status?.quant} weights is running on {status?.threads} thread{status?.threads === 1 ? '' : 's'} and
+        using {mb(status?.bytes || 0)} MB of memory.{' '}
+        <button className="textbtn" onClick={newChat} disabled={busy}>New chat</button>{' '}
+        <button className="textbtn" onClick={unload}>Unload</button>
+      </p>
       <div className="log" ref={log}>
         {msgs.length === 0 && (
           <div className="empty">
-            <p>Ask it something, or try one of these:</p>
-            <ul>{examples.map(e => <li key={e}><button className="link" onClick={() => ask(e)}>{e}</button></li>)}</ul>
+            <p>Ask it something. If you'd like a place to start, try one of these:</p>
+            <ul>{examples.map(e => <li key={e}><button className="textbtn" onClick={() => ask(e)}>{e}</button></li>)}</ul>
           </div>
         )}
         {msgs.map((m, i) => (
           <div key={i} className={`msg ${m.role}`}>
-            <span className="label">{m.role === 'user' ? 'You' : 'Mnemonic'}</span>
+            <strong className="who">{m.role === 'user' ? 'You' : 'Mnemonic'}</strong>
             {m.role === 'user'
               ? <div className="text">{m.text}</div>
-              : <div className="text" dangerouslySetInnerHTML={{ __html: md(m.text) || (busy && i === msgs.length - 1 ? '<span class="cursor"></span>' : '') }} />}
+              : <div className="text" dangerouslySetInnerHTML={{ __html: md(m.text) || (busy && i === msgs.length - 1 ? '<p class="writing">(writing)</p>' : '') }} />}
             {m.note && <p className="note">{m.note}</p>}
-            {m.meta && <span className="meta">{m.meta}</span>}
+            {m.meta && <p className="meta">{m.meta}</p>}
           </div>
         ))}
       </div>
       <form className="ask" onSubmit={submit}>
         <textarea
-          rows={1}
+          rows={2}
           value={text}
-          placeholder="Message Mnemonic"
+          placeholder="Write a message"
           onChange={e => setText(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) submit(e) }}
         />
@@ -261,13 +252,12 @@ export default function Chat() {
         <Slider label="Threads" min={1} max={cores()} step={1} v={s.threads} show={v => `${v} of ${cores()}`} on={v => set('threads', v)} />
         <label className="check">
           <input type="checkbox" checked={s.multi} onChange={e => set('multi', e.target.checked)} />
-          Remember earlier turns (it's small, it does better one question at a time)
+          Keep earlier messages in the conversation. It's a small model and usually does better without them.
         </label>
       </details>
     </div>
   )
 }
-
 function Slider({ label, min, max, step, v, show, on }) {
   return (
     <label className="slider">

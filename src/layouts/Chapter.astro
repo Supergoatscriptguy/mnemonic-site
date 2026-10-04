@@ -1,56 +1,32 @@
 ---
 import Base from './Base.astro'
+import { existsSync } from 'node:fs'
 import { chapters } from '../data/chapters.js'
 
 const { frontmatter } = Astro.props
-const i = chapters.findIndex(c => c.num === frontmatter.num)
+// only chapters that are written get links (the pages import this layout, so no glob here)
+const written = c => existsSync(`src/pages/${c.slug}.mdx`)
+const i = chapters.findIndex(c => c.slug === frontmatter.slug)
 const prev = chapters[i - 1]
 const next = chapters[i + 1]
 ---
 <Base title={frontmatter.title} description={frontmatter.lead}>
-  <article class="wrap chapter">
-    <div class="prose">
-      <p class="label">Chapter {frontmatter.num} of {chapters.length - 1}</p>
-      <h1>{frontmatter.title}</h1>
-      <p class="lead">{frontmatter.lead}</p>
-      <hr />
-      <slot />
-    </div>
-    <nav class="pager prose">
-      {prev ? <a href={`/${prev.slug}`}><span class="label">Previous</span>{prev.num}. {prev.title}</a> : <span />}
-      {next && <a class="next" href={`/${next.slug}`}><span class="label">Next</span>{next.num}. {next.title}</a>}
-    </nav>
+  <article class="prose">
+    <h1>{frontmatter.title}</h1>
+    <slot />
+    <p class="pager">
+      {prev && <>The previous chapter is {written(prev) ? <a href={`/${prev.slug}`}>{prev.title}</a> : `${prev.title} [TODO]`}. </>}
+      {next && <>Next comes {written(next) ? <a href={`/${next.slug}`}>{next.title}</a> : `${next.title} [TODO]`}.</>}
+      {!next && <>That's the last chapter. <a href="/">Back to the start</a>.</>}
+    </p>
   </article>
 </Base>
 
 <style>
-  .chapter h1 {
-    margin: 10px 0 18px;
-  }
-  .chapter hr {
-    margin: 36px 0 32px;
-  }
   .pager {
-    display: flex;
-    justify-content: space-between;
-    gap: 24px;
-    margin-top: 64px;
-    padding-top: 24px;
+    margin-top: 4rem;
+    padding-top: 1.2rem;
     border-top: 1px solid var(--rule);
-  }
-  .pager a {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    color: var(--text);
-    font-weight: 550;
-  }
-  .pager a:hover {
-    text-decoration: none;
-    color: var(--accent);
-  }
-  .pager .next {
-    text-align: right;
-    margin-left: auto;
+    color: var(--muted);
   }
 </style>

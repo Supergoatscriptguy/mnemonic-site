@@ -5,15 +5,15 @@
     "file": "mnemonic-300m-q8.mnm",
     "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-300m-q8.mnm",
     "bytes": 305307648,
-    "about": "24 layers, pretrained on 10B tokens of FineWeb-Edu, then tuned for chat on smol-smoltalk. The newest and best Mnemonic. int8 weights: the same quality as full precision at a quarter of the size."
+    "about": "The newest version, with 24 layers. It was pretrained on 10 billion tokens of FineWeb-Edu and then tuned for chat on smol-smoltalk. The weights are int8, which loses almost nothing against full precision at a quarter of the size."
   },
   {
     "id": "mnemonic-300m-int4",
-    "name": "Mnemonic 300M, small download",
+    "name": "Mnemonic 300M, smaller download",
     "file": "mnemonic-300m-q4.mnm",
     "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-300m-q4.mnm",
     "bytes": 190259200,
-    "about": "The 300M with int4 weights. A 40% smaller download and a little faster, slightly less sharp."
+    "about": "The same model with int4 weights. The download is 40% smaller and it runs a little faster, but its answers are slightly worse."
   },
   {
     "id": "mnemonic-126m-int8",
@@ -21,14 +21,14 @@
     "file": "mnemonic-q8.mnm",
     "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-q8.mnm",
     "bytes": 126508032,
-    "about": "The first Mnemonic: 16 layers, pretrained on 5B tokens of FineWeb-Edu, then tuned for chat on smol-smoltalk. Smaller and about twice as fast as the 300M."
+    "about": "The first version, with 16 layers, pretrained on 5 billion tokens of FineWeb-Edu and tuned on smol-smoltalk. It is smaller than the 300M and about twice as fast."
   },
   {
     "id": "mnemonic-126m-int4",
-    "name": "Mnemonic 126M, small download",
+    "name": "Mnemonic 126M, smaller download",
     "file": "mnemonic-q4.mnm",
     "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-q4.mnm",
     "bytes": 78748672,
-    "about": "The 126M with int4 weights, the smallest download."
+    "about": "The 126M with int4 weights. This is the smallest download."
   }
 ]

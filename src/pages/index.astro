@@ -6,177 +6,102 @@ import { chapters } from '../data/chapters.js'
 // chapters that are written so far get links
 const written = new Set(Object.keys(import.meta.glob('./*.mdx')).map(p => p.slice(2, -4)))
 const first = chapters.find(c => written.has(c.slug))
-
-const stats = [
-  ['304M', 'parameters, 24 layers'],
-  ['10B', 'tokens of FineWeb-Edu'],
-  ['90 h', 'of training on one RTX 5070 Ti'],
-  ['68', 'TFLOPS on the tensor cores, 32K tokens/s'],
-  ['220', 'tokens/s chatting on a CPU, int8'],
-  ['9.9 KB', 'the WebAssembly engine in the demo below'],
-]
 ---
 <Base>
-  <section class="wrap hero">
-    <p class="label plain">x86-64 · PTX · WebAssembly</p>
-    <h1>A chat model written entirely in assembly</h1>
-    <p class="lead prose">
-      Mnemonic is a small language model I built from the ground up in hand-written assembly. Parsing the data,
-      the tokenizer, training on the GPU, quantization and the chat program are all NASM and PTX. There's no C, no
-      Python and no CUDA toolkit, just the Windows API and the NVIDIA driver. I trained it on one RTX 5070 Ti, a
-      gaming card, and it holds a conversation.
+  <section class="prose intro">
+    <h1>A chat model I wrote in assembly</h1>
+    <p>
+      Mnemonic is a small language model that I wrote by hand in x86-64 assembly and in PTX, the assembly language of
+      NVIDIA's GPUs. That covers everything it took to make it: reading the training data, the tokenizer, the training
+      on the GPU, shrinking the weights afterwards, and the program you chat with. None of it is C or Python, and it
+      doesn't use the CUDA toolkit. The only outside code it calls is the Windows API and the NVIDIA driver.
     </p>
-    <p class="cta">
-      <a class="btn" href={first ? `/${first.slug}` : '#chapters'}>Read how it was built</a>
-      <a class="btn quiet" href="https://github.com/Supergoatscriptguy/Mnemonic">Source on GitHub</a>
+    <p>
+      I trained it at home on an RTX 5070 Ti, which is a graphics card made for games. It's nowhere near the models
+      people usually chat with, but it knows its name, keeps up a simple conversation and explains everyday things
+      reasonably well.
+    </p>
+    <p>
+      You can try it further down this page. I built it in eleven stages and wrote a chapter about each one, starting
+      with {first ? <a href={`/${first.slug}`}>{first.title.toLowerCase()}</a> : 'the chapters below'}. The code is on <a href="https://github.com/Supergoatscriptguy/Mnemonic">GitHub</a>.
     </p>
   </section>
 
-  <section class="wrap">
-    <dl class="stats">
-      {stats.map(([n, what]) => (
-        <div>
-          <dt>{n}</dt>
-          <dd>{what}</dd>
-        </div>
-      ))}
+  <section class="numbers">
+    <p class="prose">This is what went into the current version.</p>
+    <dl class="facts">
+      <dt>Parameters</dt>
+      <dd>304 million, in 24 layers</dd>
+      <dt>Training data</dt>
+      <dd>10 billion tokens of FineWeb-Edu, then 389 million tokens of chat data</dd>
+      <dt>Training time</dt>
+      <dd>90.4 hours of pretraining and 3.4 hours of chat tuning, on one RTX 5070 Ti</dd>
+      <dt>Training speed</dt>
+      <dd>about 32,000 tokens a second, 68 TFLOPS in bf16</dd>
+      <dt>Chat speed on a CPU</dt>
+      <dd>about 220 tokens a second with int8 weights, on 12 threads of a Core Ultra 7 265F</dd>
+      <dt>The browser engine</dt>
+      <dd>9,867 bytes of WebAssembly</dd>
     </dl>
   </section>
 
-  <section class="wrap" id="try">
+  <section class="prose" id="try">
     <h2>Try it</h2>
-    <p class="prose sub">
-      It's small. It's good at friendly conversation and simple explanations, and unreliable on facts and math.
-      It does best with one question at a time.
+    <p>
+      It runs in your browser on your own computer, so the model has to download before it can answer. It handles
+      small talk and simple explanations, but it often gets facts and arithmetic wrong, and it does better with one
+      question at a time than with a long back and forth.
     </p>
-    <div class="prose demo-wrap">
-      <Chat client:load />
-    </div>
+    <Chat client:load />
   </section>
 
-  <section class="wrap" id="chapters">
+  <section class="prose" id="chapters">
     <h2>How it was built</h2>
-    <p class="prose sub">One chapter per stage of the project, in the order I built it.</p>
-    <ol class="toc prose">
+    <ul class="toc">
       {chapters.map(c => (
         <li>
-          <span class="n">{String(c.num).padStart(2, '0')}</span>
-          <div>
-            {written.has(c.slug) ? <a href={`/${c.slug}`}>{c.title}</a> : <span class="soon">{c.title}</span>}
-            <p>{c.summary}</p>
-          </div>
+          {written.has(c.slug) ? <a href={`/${c.slug}`}>{c.title}</a> : <span>{c.title} [TODO]</span>}
+          <span class="what">{c.summary}</span>
         </li>
       ))}
-    </ol>
+    </ul>
   </section>
 
-  <section class="wrap" id="run">
-    <h2>Run it yourself</h2>
-    <div class="prose">
-      <p>With Ollama:</p>
-      <pre><code>ollama run supergoatscriptguy/mnemonic</code></pre>
-      <p>
-        Or with its own engine: the weights for the assembly CPU engine are on <a href="https://huggingface.co/SuperGoatScriptGuy/Mnemonic">Hugging Face</a>,
-        and the code to build it is on <a href="https://github.com/Supergoatscriptguy/Mnemonic">GitHub</a>.
-      </p>
-    </div>
-  </section>
+  <div class="prose outro">
+    <p>If you'd rather run it on your own machine, Ollama has the 300M:</p>
+    <pre><code>ollama run supergoatscriptguy/mnemonic</code></pre>
+    <p>The weights for its own CPU engine are on <a href="https://huggingface.co/SuperGoatScriptGuy/Mnemonic">Hugging Face</a>.</p>
+  </div>
 </Base>
 
 <style>
-  .plain {
-    text-transform: none;
+  .intro {
+    margin-top: 1.5rem;
   }
-  .hero {
-    padding: 24px 24px 8px;
+  .numbers {
+    margin-top: 3.5rem;
   }
-  .hero h1 {
-    margin: 14px 0 20px;
-    max-width: 14em;
-    font-size: 3rem;
-    line-height: 1.08;
+  .numbers p {
+    margin-bottom: 0.6rem;
   }
-  .cta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-    margin-top: 28px;
+  #try {
+    margin-top: 5rem;
   }
-  .stats {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    margin: 56px 0 0;
-    border-top: 1px solid var(--rule);
-  }
-  .stats div {
-    padding: 22px 20px 22px 0;
-    border-bottom: 1px solid var(--rule);
-  }
-  .stats dt {
-    font-size: 1.9rem;
-    font-weight: 600;
-    letter-spacing: -0.03em;
-    font-variant-numeric: tabular-nums;
-  }
-  .stats dd {
-    margin: 2px 0 0;
-    color: var(--muted);
-    font-size: 15px;
-  }
-  section + section {
-    margin-top: 80px;
-  }
-  h2 {
-    margin-top: 0;
-  }
-  .sub {
-    color: var(--muted);
-    margin-bottom: 24px;
+  #chapters {
+    margin-top: 4.5rem;
   }
   .toc {
     list-style: none;
     padding: 0;
-    border-top: 1px solid var(--rule);
   }
   .toc li {
-    display: grid;
-    grid-template-columns: 48px 1fr;
-    padding: 14px 0;
-    margin: 0;
-    border-bottom: 1px solid var(--rule);
+    margin: 0 0 0.9rem;
   }
-  .toc .n {
-    color: var(--faint);
-    font: 14px/1.9 var(--mono);
-  }
-  .toc a,
-  .toc .soon {
-    font-weight: 550;
-  }
-  .toc a {
-    color: var(--text);
-  }
-  .toc a:hover {
-    color: var(--accent);
-    text-decoration: none;
-  }
-  .toc .soon {
+  .toc .what {
+    display: block;
     color: var(--muted);
   }
-  .toc p {
-    margin: 2px 0 0;
-    color: var(--muted);
-    font-size: 15px;
-  }
-  @media (max-width: 640px) {
-    .hero h1 {
-      font-size: 2.2rem;
-    }
-    .stats {
-      grid-template-columns: repeat(2, 1fr);
-    }
-    .stats dt {
-      font-size: 1.5rem;
-    }
+  .outro {
+    margin-top: 3.5rem;
   }
 </style>

@@ -1,7 +1,7 @@
 ---
 // a line chart drawn as plain svg at build time, no script on the page.
 // series: [{ name, points: [[x, y], ...] }], the first is drawn in the text colour,
-// the rest in the accent
+// the rest dashed and lighter
 const { series, x, y, xLabel = '', yLabel = '', w = 640, h = 300 } = Astro.props
 const pad = { l: 46, r: 16, t: 14, b: 40 }
 const sx = v => pad.l + ((v - x.min) / (x.max - x.min)) * (w - pad.l - pad.r)
@@ -41,17 +41,17 @@ const path = pts => pts.map(([a, b], i) => `${i ? 'L' : 'M'}${sx(a).toFixed(1)},
     stroke-width: 1;
   }
   .axis {
-    stroke: var(--faint);
+    stroke: var(--muted);
     stroke-width: 1;
   }
   .tick {
     fill: var(--muted);
-    font-size: 11.5px;
+    font-size: 13px;
     font-variant-numeric: tabular-nums;
   }
   .title {
     fill: var(--muted);
-    font-size: 11.5px;
+    font-size: 13px;
   }
   path {
     fill: none;
@@ -65,19 +65,19 @@ const path = pts => pts.map(([a, b], i) => `${i ? 'L' : 'M'}${sx(a).toFixed(1)},
     fill: var(--text);
   }
   .alt path {
-    stroke: var(--accent);
+    stroke: var(--muted);
+    stroke-dasharray: 5 4;
   }
   .alt circle {
-    fill: var(--accent);
+    fill: var(--muted);
   }
   .name {
-    font-size: 12.5px;
-    font-weight: 600;
+    font-size: 14px;
   }
   .main .name {
     fill: var(--text);
   }
   .alt .name {
-    fill: var(--accent);
+    fill: var(--muted);
   }
 </style>
