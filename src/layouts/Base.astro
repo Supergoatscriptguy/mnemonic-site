@@ -1,0 +1,58 @@
+---
+import '../styles/global.css'
+
+const { title, description = 'A chat language model written entirely in assembly, trained on one gaming GPU.' } = Astro.props
+const full = title ? `${title} · Mnemonic` : 'Mnemonic: a chat model written in assembly'
+const here = Astro.url.pathname
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{full}</title>
+    <meta name="description" content={description} />
+    <meta name="author" content="Supergoatscriptguy" />
+    <script is:inline>
+      // before the first paint, so a remembered theme doesn't flash
+      try {
+        const t = localStorage.getItem('theme')
+        if (t) document.documentElement.dataset.theme = t
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <header class="site">
+      <div class="wrap">
+        <a class="wordmark" href="/">Mnemonic</a>
+        <nav class="site">
+          <a href="/#chapters" aria-current={here !== '/' ? 'page' : undefined}>Chapters</a>
+          <a href="https://github.com/Supergoatscriptguy/Mnemonic">GitHub</a>
+          <a class="hide-small" href="https://huggingface.co/SuperGoatScriptGuy/Mnemonic">Hugging Face</a>
+          <a class="hide-small" href="https://ollama.com/supergoatscriptguy/mnemonic">Ollama</a>
+          <button class="theme" type="button" id="theme">Theme</button>
+        </nav>
+      </div>
+    </header>
+    <main>
+      <slot />
+    </main>
+    <footer class="site">
+      <div class="wrap">
+        <span>Made by Supergoatscriptguy</span>
+        <a href="https://github.com/Supergoatscriptguy/Mnemonic">Source</a>
+        <span class="right">x86-64 · PTX · WebAssembly</span>
+      </div>
+    </footer>
+    <script is:inline>
+      document.getElementById('theme').addEventListener('click', () => {
+        const root = document.documentElement
+        const dark = root.dataset.theme
+          ? root.dataset.theme === 'dark'
+          : matchMedia('(prefers-color-scheme: dark)').matches
+        root.dataset.theme = dark ? 'light' : 'dark'
+        try { localStorage.setItem('theme', root.dataset.theme) } catch {}
+      })
+    </script>
+  </body>
+</html>

@@ -1,0 +1,182 @@
+---
+import Base from '../layouts/Base.astro'
+import Chat from '../components/Chat.jsx'
+import { chapters } from '../data/chapters.js'
+
+// chapters that are written so far get links
+const written = new Set(Object.keys(import.meta.glob('./*.mdx')).map(p => p.slice(2, -4)))
+const first = chapters.find(c => written.has(c.slug))
+
+const stats = [
+  ['304M', 'parameters, 24 layers'],
+  ['10B', 'tokens of FineWeb-Edu'],
+  ['90 h', 'of training on one RTX 5070 Ti'],
+  ['68', 'TFLOPS on the tensor cores, 32K tokens/s'],
+  ['220', 'tokens/s chatting on a CPU, int8'],
+  ['9.9 KB', 'the WebAssembly engine in the demo below'],
+]
+---
+<Base>
+  <section class="wrap hero">
+    <p class="label plain">x86-64 · PTX · WebAssembly</p>
+    <h1>A chat model written entirely in assembly</h1>
+    <p class="lead prose">
+      Mnemonic is a small language model I built from the ground up in hand-written assembly. Parsing the data,
+      the tokenizer, training on the GPU, quantization and the chat program are all NASM and PTX. There's no C, no
+      Python and no CUDA toolkit, just the Windows API and the NVIDIA driver. I trained it on one RTX 5070 Ti, a
+      gaming card, and it holds a conversation.
+    </p>
+    <p class="cta">
+      <a class="btn" href={first ? `/${first.slug}` : '#chapters'}>Read how it was built</a>
+      <a class="btn quiet" href="https://github.com/Supergoatscriptguy/Mnemonic">Source on GitHub</a>
+    </p>
+  </section>
+
+  <section class="wrap">
+    <dl class="stats">
+      {stats.map(([n, what]) => (
+        <div>
+          <dt>{n}</dt>
+          <dd>{what}</dd>
+        </div>
+      ))}
+    </dl>
+  </section>
+
+  <section class="wrap" id="try">
+    <h2>Try it</h2>
+    <p class="prose sub">
+      It's small. It's good at friendly conversation and simple explanations, and unreliable on facts and math.
+      It does best with one question at a time.
+    </p>
+    <div class="prose demo-wrap">
+      <Chat client:load />
+    </div>
+  </section>
+
+  <section class="wrap" id="chapters">
+    <h2>How it was built</h2>
+    <p class="prose sub">One chapter per stage of the project, in the order I built it.</p>
+    <ol class="toc prose">
+      {chapters.map(c => (
+        <li>
+          <span class="n">{String(c.num).padStart(2, '0')}</span>
+          <div>
+            {written.has(c.slug) ? <a href={`/${c.slug}`}>{c.title}</a> : <span class="soon">{c.title}</span>}
+            <p>{c.summary}</p>
+          </div>
+        </li>
+      ))}
+    </ol>
+  </section>
+
+  <section class="wrap" id="run">
+    <h2>Run it yourself</h2>
+    <div class="prose">
+      <p>With Ollama:</p>
+      <pre><code>ollama run supergoatscriptguy/mnemonic</code></pre>
+      <p>
+        Or with its own engine: the weights for the assembly CPU engine are on <a href="https://huggingface.co/SuperGoatScriptGuy/Mnemonic">Hugging Face</a>,
+        and the code to build it is on <a href="https://github.com/Supergoatscriptguy/Mnemonic">GitHub</a>.
+      </p>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .plain {
+    text-transform: none;
+  }
+  .hero {
+    padding: 24px 24px 8px;
+  }
+  .hero h1 {
+    margin: 14px 0 20px;
+    max-width: 14em;
+    font-size: 3rem;
+    line-height: 1.08;
+  }
+  .cta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 28px;
+  }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    margin: 56px 0 0;
+    border-top: 1px solid var(--rule);
+  }
+  .stats div {
+    padding: 22px 20px 22px 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .stats dt {
+    font-size: 1.9rem;
+    font-weight: 600;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+  }
+  .stats dd {
+    margin: 2px 0 0;
+    color: var(--muted);
+    font-size: 15px;
+  }
+  section + section {
+    margin-top: 80px;
+  }
+  h2 {
+    margin-top: 0;
+  }
+  .sub {
+    color: var(--muted);
+    margin-bottom: 24px;
+  }
+  .toc {
+    list-style: none;
+    padding: 0;
+    border-top: 1px solid var(--rule);
+  }
+  .toc li {
+    display: grid;
+    grid-template-columns: 48px 1fr;
+    padding: 14px 0;
+    margin: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  .toc .n {
+    color: var(--faint);
+    font: 14px/1.9 var(--mono);
+  }
+  .toc a,
+  .toc .soon {
+    font-weight: 550;
+  }
+  .toc a {
+    color: var(--text);
+  }
+  .toc a:hover {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .toc .soon {
+    color: var(--muted);
+  }
+  .toc p {
+    margin: 2px 0 0;
+    color: var(--muted);
+    font-size: 15px;
+  }
+  @media (max-width: 640px) {
+    .hero h1 {
+      font-size: 2.2rem;
+    }
+    .stats {
+      grid-template-columns: repeat(2, 1fr);
+    }
+    .stats dt {
+      font-size: 1.5rem;
+    }
+  }
+</style>

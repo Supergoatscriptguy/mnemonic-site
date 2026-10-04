@@ -1,0 +1,83 @@
+---
+// a line chart drawn as plain svg at build time, no script on the page.
+// series: [{ name, points: [[x, y], ...] }], the first is drawn in the text colour,
+// the rest in the accent
+const { series, x, y, xLabel = '', yLabel = '', w = 640, h = 300 } = Astro.props
+const pad = { l: 46, r: 16, t: 14, b: 40 }
+const sx = v => pad.l + ((v - x.min) / (x.max - x.min)) * (w - pad.l - pad.r)
+const sy = v => h - pad.b - ((v - y.min) / (y.max - y.min)) * (h - pad.t - pad.b)
+const path = pts => pts.map(([a, b], i) => `${i ? 'L' : 'M'}${sx(a).toFixed(1)},${sy(b).toFixed(1)}`).join('')
+---
+<svg class="chart" viewBox={`0 0 ${w} ${h}`} role="img" aria-label={yLabel}>
+  {y.ticks.map(t => (
+    <g>
+      <line class="grid" x1={pad.l} x2={w - pad.r} y1={sy(t)} y2={sy(t)} />
+      <text class="tick" x={pad.l - 8} y={sy(t) + 4} text-anchor="end">{t}</text>
+    </g>
+  ))}
+  {x.ticks.map(t => (
+    <text class="tick" x={sx(t)} y={h - pad.b + 18} text-anchor="middle">{t}</text>
+  ))}
+  <line class="axis" x1={pad.l} x2={w - pad.r} y1={h - pad.b} y2={h - pad.b} />
+  <text class="title" x={w - pad.r} y={h - 4} text-anchor="end">{xLabel}</text>
+  {series.map((s, i) => (
+    <g class={i ? 'alt' : 'main'}>
+      <path d={path(s.points)} />
+      {s.points.map(([a, b]) => <circle cx={sx(a)} cy={sy(b)} r="2.6" />)}
+      <text class="name" x={sx(s.points.at(-1)[0]) - 6} y={sy(s.points.at(-1)[1]) - 10} text-anchor="end">{s.name}</text>
+    </g>
+  ))}
+</svg>
+
+<style>
+  .chart {
+    width: 100%;
+    height: auto;
+    display: block;
+    font-family: var(--sans);
+  }
+  .grid {
+    stroke: var(--rule);
+    stroke-width: 1;
+  }
+  .axis {
+    stroke: var(--faint);
+    stroke-width: 1;
+  }
+  .tick {
+    fill: var(--muted);
+    font-size: 11.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .title {
+    fill: var(--muted);
+    font-size: 11.5px;
+  }
+  path {
+    fill: none;
+    stroke-width: 1.8;
+    stroke-linejoin: round;
+  }
+  .main path {
+    stroke: var(--text);
+  }
+  .main circle {
+    fill: var(--text);
+  }
+  .alt path {
+    stroke: var(--accent);
+  }
+  .alt circle {
+    fill: var(--accent);
+  }
+  .name {
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .main .name {
+    fill: var(--text);
+  }
+  .alt .name {
+    fill: var(--accent);
+  }
+</style>
