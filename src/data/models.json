@@ -5,7 +5,7 @@
     "file": "mnemonic-300m-q8.mnm",
     "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-300m-q8.mnm",
     "bytes": 305307648,
-    "about": "The newest version, with 24 layers. It was pretrained on 10 billion tokens of FineWeb-Edu and then tuned for chat on smol-smoltalk. The weights are int8, which loses almost nothing against full precision at a quarter of the size."
+    "about": "The second version, with 24 layers. It was pretrained on 10 billion tokens of FineWeb-Edu and then tuned for chat on smol-smoltalk. The weights are int8, which loses almost nothing against full precision at a quarter of the size."
   },
   {
     "id": "mnemonic-300m-int4",
@@ -14,6 +14,22 @@
     "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-300m-q4.mnm",
     "bytes": 190259200,
     "about": "The same model with int4 weights. The download is 40% smaller and it runs a little faster, but its answers are slightly worse."
+  },
+  {
+    "id": "mnemonic-755m-int8",
+    "name": "Mnemonic 755M",
+    "file": "mnemonic-755m-q8.mnm",
+    "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-755m-q8.mnm",
+    "bytes": 757008384,
+    "about": "The newest and biggest version, with 28 layers. It was pretrained on 15 billion tokens of FineWeb-Edu and tuned for chat on smol-smoltalk. It knows more than the 300M and makes fewer mistakes, but the download is two and a half times bigger and it writes less than half as fast."
+  },
+  {
+    "id": "mnemonic-755m-int4",
+    "name": "Mnemonic 755M, smaller download",
+    "file": "mnemonic-755m-q4.mnm",
+    "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-755m-q4.mnm",
+    "bytes": 472213504,
+    "about": "The 755M with int4 weights. The download is 38% smaller and it runs a little faster, but its answers are slightly worse."
   },
   {
     "id": "mnemonic-126m-int8",
