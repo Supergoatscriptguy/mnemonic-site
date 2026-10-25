@@ -144,7 +144,8 @@ export default function Chat() {
     if (busy || !eng.current) return
     setMsgs(m => [...m, { role: 'user', text: q }, { role: 'bot', text: '', meta: '' }])
     setBusy(true)
-    eng.current.driver.postMessage({ type: 'chat', text: q, s: { temp: s.temp, topp: s.topp, max: s.max, multi: s.multi } })
+    // the math model is only ever run greedy, the way it was tested
+    eng.current.driver.postMessage({ type: 'chat', text: q, s: { temp: model.temp ?? s.temp, topp: s.topp, max: model.max ?? s.max, multi: s.multi } })
   }
 
   function submit(ev) {
@@ -217,7 +218,7 @@ export default function Chat() {
         {msgs.length === 0 && (
           <div className="empty">
             <p>Ask it something. If you'd like a place to start, try one of these:</p>
-            <ul>{examples.map(e => <li key={e}><button className="textbtn" onClick={() => ask(e)}>{e}</button></li>)}</ul>
+            <ul>{(model.examples || examples).map(e => <li key={e}><button className="textbtn" onClick={() => ask(e)}>{e}</button></li>)}</ul>
           </div>
         )}
         {msgs.map((m, i) => (
@@ -243,9 +244,11 @@ export default function Chat() {
       </form>
       <details className="settings">
         <summary>Settings</summary>
-        <Slider label="Temperature" min={0} max={1.5} step={0.05} v={s.temp} show={v => v.toFixed(2)} on={v => set('temp', v)} />
-        <Slider label="Top-p" min={0.1} max={1} step={0.05} v={s.topp} show={v => v.toFixed(2)} on={v => set('topp', v)} />
-        <Slider label="Longest reply" min={50} max={1000} step={50} v={s.max} show={v => `${v} tokens`} on={v => set('max', v)} />
+        {model.temp === undefined ? <>
+          <Slider label="Temperature" min={0} max={1.5} step={0.05} v={s.temp} show={v => v.toFixed(2)} on={v => set('temp', v)} />
+          <Slider label="Top-p" min={0.1} max={1} step={0.05} v={s.topp} show={v => v.toFixed(2)} on={v => set('topp', v)} />
+          <Slider label="Longest reply" min={50} max={1000} step={50} v={s.max} show={v => `${v} tokens`} on={v => set('max', v)} />
+        </> : <p className="note">This one always picks the likeliest next token, which is how it was tested.</p>}
         <Slider label="Threads" min={1} max={cores()} step={1} v={s.threads} show={v => `${v} of ${cores()}`} on={v => set('threads', v)} />
         <label className="check">
           <input type="checkbox" checked={s.multi} onChange={e => set('multi', e.target.checked)} />
