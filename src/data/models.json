@@ -57,5 +57,16 @@
     "temp": 0,
     "max": 1800,
     "examples": ["What is 17 × 23?", "Solve 3x + 5 = 20.", "Factor x^2 + 5x + 6.", "Simplify √2016."]
+  },
+  {
+    "id": "mnemonic-math-int4",
+    "name": "Mnemonic Math, smaller download",
+    "file": "mnemonic-math-q4.mnm",
+    "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-math-q4.mnm",
+    "bytes": 190259200,
+    "about": "The math model with int4 weights. The download is 38% smaller, and on the same tests it got exactly as many right as the int8 one.",
+    "temp": 0,
+    "max": 1800,
+    "examples": ["What is 17 × 23?", "Solve 3x + 5 = 20.", "Factor x^2 + 5x + 6.", "Simplify √2016."]
   }
 ]
