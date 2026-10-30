@@ -49,6 +49,9 @@ export default function Chat() {
     const got = {}
     try {
       const cache = await caches.open(CACHE)
+      // a new version of a model gets a new url, so drop the old files
+      for (const r of await cache.keys())
+        if (!models.some(m => m.url === r.url)) await cache.delete(r)
       for (const m of models) {
         const r = await cache.match(m.url)
         got[m.id] = !!r && +r.headers.get('content-length') === m.bytes

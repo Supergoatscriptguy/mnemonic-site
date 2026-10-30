@@ -51,22 +51,22 @@
     "id": "mnemonic-math-int8",
     "name": "Mnemonic Math",
     "file": "mnemonic-math-q8.mnm",
-    "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-math-q8.mnm",
+    "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/ab7789fc69f98d0a1d1b91b2ebd5e53e0d8d8b05/mnemonic-math-q8.mnm",
     "bytes": 305307648,
-    "about": "A separate version that only does math: the 300M, fine-tuned on about 15 million generated problems that are worked out one small step at a time. It does arithmetic, fractions, decimals, percents, factoring, square roots, equations, inequalities, lines, sequences and word problems, and gets 99.7% of problems it hasn't seen right. It only knows those kinds of problems, though. Ask it anything else and it will still answer, wrongly.",
+    "about": "A separate version that only does math: the 300M, fine-tuned on about 22 million generated problems that are worked out one small step at a time. It does arithmetic, fractions, decimals, percents, factoring, square roots, equations, inequalities, lines, sequences, unit conversions, money, probability, logarithms, derivatives and word problems, and gets 99.6% of problems it hasn't seen right. It only knows those kinds of problems, though. Ask it anything else and it will still answer, wrongly.",
     "temp": 0,
     "max": 1800,
-    "examples": ["What is 17 × 23?", "Solve 3x + 5 = 20.", "Factor x^2 + 5x + 6.", "Simplify √2016."]
+    "examples": ["What is 17 × 23?", "Factor x^2 + 5x + 6.", "What is the derivative of 3x^2 + 4x?", "What is 15% off $80?"]
   },
   {
     "id": "mnemonic-math-int4",
     "name": "Mnemonic Math, smaller download",
     "file": "mnemonic-math-q4.mnm",
-    "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/main/mnemonic-math-q4.mnm",
+    "url": "https://huggingface.co/SuperGoatScriptGuy/Mnemonic/resolve/ab7789fc69f98d0a1d1b91b2ebd5e53e0d8d8b05/mnemonic-math-q4.mnm",
     "bytes": 190259200,
-    "about": "The math model with int4 weights. The download is 38% smaller, and on the same tests it got exactly as many right as the int8 one.",
+    "about": "The math model with int4 weights. The download is 38% smaller, and on the same tests it did as well as the int8 one.",
     "temp": 0,
     "max": 1800,
-    "examples": ["What is 17 × 23?", "Solve 3x + 5 = 20.", "Factor x^2 + 5x + 6.", "Simplify √2016."]
+    "examples": ["What is 17 × 23?", "Factor x^2 + 5x + 6.", "What is the derivative of 3x^2 + 4x?", "What is 15% off $80?"]
   }
 ]
